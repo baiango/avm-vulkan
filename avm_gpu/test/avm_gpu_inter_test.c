@@ -22,6 +22,7 @@
 
 #include "config/avm_dsp_rtcd.h"
 #include "avm_dsp/blend.h"
+#include "av2/common/blockd.h"
 #include "av2/common/filter.h"
 
 #include "avm_gpu/vulkan_gpu.h"
@@ -194,7 +195,42 @@ int main(void) {
     }
   }
   free(src1p);
-  free(maskbuf);
+
+  /* Weighted (CWP) compound: avm_highbd_cwp_c(). */
+  static const int kCwp[5][2] = { { 38, 26 }, { 46, 18 }, { 64, 0 },
+                                  { 0, 64 },  { 20, 44 } };
+  uint16_t *pred2 = malloc(sizeof(uint16_t) * SRC_W * SRC_H);
+  if (!pred2) return 1;
+  for (int i = 0; i < SRC_W * SRC_H; i++) pred2[i] = (uint16_t)(rnd() & 0x3ff);
+  for (size_t ci = 0; ci < 5; ci++) {
+    for (size_t si = 0; si < sizeof(kSizes) / sizeof(kSizes[0]); si++) {
+      const int n = kSizes[si];
+      CWP_PARAMS cwp;
+      cwp.fwd_offset = kCwp[ci][0];
+      cwp.bck_offset = kCwp[ci][1];
+      memset(cpu, 0, sizeof(cpu));
+      memset(gpu, 0, sizeof(gpu));
+      avm_highbd_cwp_c(cpu, pred2, n, n, plane, SRC_W, &cwp);
+      /* avm_highbd_cwp_c() advances pred by width, i.e. it expects a packed
+       * w x h block, so the GPU call uses stride n for pred as well. */
+      if (avm_gpu_inter_cwp(ctx, inter, pred2, n, plane, SRC_W, n, n,
+                            cwp.fwd_offset, cwp.bck_offset, gpu, DST_STRIDE,
+                            err) != 0) {
+        fprintf(stderr, "avm_gpu cwp: %s\n", err);
+        return 1;
+      }
+      int diff = 0;
+      for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+          if (cpu[y * n + x] != gpu[y * DST_STRIDE + x]) diff++;
+        }
+      }
+      failures += diff != 0;
+      printf("cwp  %2d/%2d %-3d %9s %s\n", kCwp[ci][0], kCwp[ci][1], n, "-",
+             diff ? "MISMATCH" : "ok");
+    }
+  }
+  free(pred2);
 
   free(plane);
   avm_gpu_inter_destroy(ctx, inter);

@@ -51,6 +51,16 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                             int subw, int subh, int bd, uint16_t *dst,
                             int dst_stride, char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Weighted (CWP) compound: comp = ROUND_POWER_OF_TWO(pred * bck_offset +
+ * ref * fwd_offset, 4), matching avm_highbd_cwp_c().
+ */
+int avm_gpu_inter_cwp(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
+                      const uint16_t *pred, int pred_stride,
+                      const uint16_t *ref, int ref_stride, int w, int h,
+                      int fwd_offset, int bck_offset, uint16_t *out,
+                      int out_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                                   const uint16_t *src, int src_stride,
                                   int src_rows, int sx, int sy,

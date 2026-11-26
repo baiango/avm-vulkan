@@ -1,0 +1,35 @@
+#version 450
+// Weighted (CWP) compound prediction, one invocation per pixel.
+//
+// Mirrors avm_dsp/variance.c avm_highbd_cwp_c():
+//   comp = ROUND_POWER_OF_TWO(pred * bck_offset + ref * fwd_offset,
+//                             DIST_PRECISION_BITS)
+// with DIST_PRECISION_BITS = 4 and the C's uint16_t store (no clip).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer PredIn { uint pred_px[]; };
+layout(std430, binding = 1) readonly buffer RefIn { uint ref_px[]; };
+layout(std430, binding = 2) writeonly buffer Out { uint out_px[]; };
+
+layout(push_constant) uniform PC {
+  uint pred_stride;
+  uint ref_stride;
+  uint out_stride;
+  uint w;
+  uint h;
+  int fwd_offset;
+  int bck_offset;
+  uint pad;
+} pc;
+
+void main() {
+  const int x = int(gl_GlobalInvocationID.x);
+  const int y = int(gl_GlobalInvocationID.y);
+  if (x >= int(pc.w) || y >= int(pc.h)) return;
+
+  const int p = int(pred_px[uint(y) * pc.pred_stride + uint(x)]);
+  const int r = int(ref_px[uint(y) * pc.ref_stride + uint(x)]);
+  const int tmp = (p * pc.bck_offset + r * pc.fwd_offset + 8) >> 4;
+  out_px[uint(y) * pc.out_stride + uint(x)] = uint(tmp) & 0xffffu;
+}

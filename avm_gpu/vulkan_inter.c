@@ -24,12 +24,18 @@
 #ifndef AVM_GPU_COMPOUND_SPV_PATH
 #define AVM_GPU_COMPOUND_SPV_PATH "compound.spv"
 #endif
+#ifndef AVM_GPU_CWP_SPV_PATH
+#define AVM_GPU_CWP_SPV_PATH "cwp.spv"
+#endif
 
 #define INTER_FILTER_ENTRIES (16 * 8)
 
 struct avm_gpu_inter {
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *blend_pipe;
+  avm_gpu_pipeline *cwp_pipe;
+  avm_gpu_buf cpred, cref, cout;
+  VkDeviceSize cpred_cap, cref_cap, cout_cap;
   avm_gpu_buf s0, s1, mask, bdst;
   VkDeviceSize s0_cap, s1_cap, mask_cap, bdst_cap;
   uint32_t *scratch;
@@ -74,6 +80,11 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
     avm_gpu_inter_destroy(ctx, in);
     return -1;
   }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_CWP_SPV_PATH, "AVM_GPU_CWP_SPV", 3,
+                              8 * 4, &in->cwp_pipe, err) != 0) {
+    avm_gpu_inter_destroy(ctx, in);
+    return -1;
+  }
   *out = in;
   return 0;
 }
@@ -82,6 +93,7 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   if (!in) return;
   avm_gpu_pipeline_destroy(ctx, in->pipe);
   avm_gpu_pipeline_destroy(ctx, in->blend_pipe);
+  avm_gpu_pipeline_destroy(ctx, in->cwp_pipe);
   avm_gpu_buf_destroy(ctx, &in->src);
   avm_gpu_buf_destroy(ctx, &in->filt);
   avm_gpu_buf_destroy(ctx, &in->dst);
@@ -89,6 +101,9 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   avm_gpu_buf_destroy(ctx, &in->s1);
   avm_gpu_buf_destroy(ctx, &in->mask);
   avm_gpu_buf_destroy(ctx, &in->bdst);
+  avm_gpu_buf_destroy(ctx, &in->cpred);
+  avm_gpu_buf_destroy(ctx, &in->cref);
+  avm_gpu_buf_destroy(ctx, &in->cout);
   free(in->scratch);
   free(in->expand);
   free(in);
@@ -254,6 +269,57 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
+    }
+  }
+  return 0;
+}
+
+typedef struct cwp_pc {
+  uint32_t pred_stride, ref_stride, out_stride, w, h;
+  int32_t fwd_offset, bck_offset;
+  uint32_t pad;
+} cwp_pc;
+
+int avm_gpu_inter_cwp(avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *pred,
+                      int pred_stride, const uint16_t *ref, int ref_stride,
+                      int w, int h, int fwd_offset, int bck_offset,
+                      uint16_t *out, int out_stride,
+                      char err[AVM_GPU_ERR_LEN]) {
+  if (!pred || !ref || !out) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (w <= 0 || h <= 0 || w > 64 || h > 64) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", w, h);
+    return -1;
+  }
+  const size_t pn = (size_t)pred_stride * h;
+  const size_t rn = (size_t)ref_stride * h;
+  const size_t on = (size_t)out_stride * h;
+  if (ensure_buf(ctx, &in->cpred, &in->cpred_cap, (VkDeviceSize)pn * 4, err) ||
+      ensure_buf(ctx, &in->cref, &in->cref_cap, (VkDeviceSize)rn * 4, err) ||
+      ensure_buf(ctx, &in->cout, &in->cout_cap, (VkDeviceSize)on * 4, err)) {
+    return -1;
+  }
+  uint32_t *pp = in->cpred.mapped;
+  uint32_t *rp = in->cref.mapped;
+  for (size_t i = 0; i < pn; i++) pp[i] = pred[i];
+  for (size_t i = 0; i < rn; i++) rp[i] = ref[i];
+
+  const avm_gpu_buf bufs[3] = { in->cpred, in->cref, in->cout };
+  cwp_pc pc = { (uint32_t)pred_stride, (uint32_t)ref_stride,
+                (uint32_t)out_stride,  (uint32_t)w,
+                (uint32_t)h,           (int32_t)fwd_offset,
+                (int32_t)bck_offset,   0 };
+  const uint32_t gx = (uint32_t)((w + 7) / 8);
+  const uint32_t gy = (uint32_t)((h + 7) / 8);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwp_pipe, bufs, 3, &pc,
+                                              sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+  const uint32_t *res = in->cout.mapped;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      out[(size_t)y * out_stride + x] = (uint16_t)res[y * out_stride + x];
     }
   }
   return 0;

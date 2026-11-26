@@ -4,8 +4,8 @@ Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
 `highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST, IDTX and FLIPADST primary types, square and
 rectangular 4..32) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel convolve (unscaled and
-scaled), compound A64 mask blending and affine (warped) prediction
-(regular and extended-range filters), generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
+scaled), compound A64 mask blending, weighted (CWP) compound and affine
+(warped) prediction (regular and extended-range filters), generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
 **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
@@ -69,7 +69,9 @@ and throughput is not claimed — this milestone is about correctness.
   classifier, thresholds, band count, block size and bo-only mode (gate:
   `test/avm_gpu_ccso_test.c`).
 - `avm_gpu_inter_blend_a64()` matches `avm_highbd_blend_a64_mask_c()` for all
-  four mask subsampling modes (gate: `test/avm_gpu_inter_test.c`).
+  four mask subsampling modes, and `avm_gpu_inter_cwp()` matches
+  `avm_highbd_cwp_c()` for 5 offset pairs x 5 block sizes (gate:
+  `test/avm_gpu_inter_test.c`, 165 cases in total).
 - `avm_gpu_warp_affine()` matches `av2_highbd_warp_affine_c()` for the
   single-reference case, luma and chroma: 3 affine matrices x 3 shear settings
   x 7 block sizes (luma 8x8..32x16, chroma 4x4..8x8) x the chroma subsampling
@@ -106,6 +108,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix |
 | `kernels/inter.comp` | 8-tap separable subpel filter, one invocation per pixel |
 | `kernels/compound.comp` | A64 mask blend of two predictors (mask subsampling included) |
+| `kernels/cwp.comp` | weighted (CWP) compound average, `avm_highbd_cwp_c` |
 | `kernels/warp.comp` | affine projection (64-bit products via `imulExtended`) + 8-tap warp filter |
 | `kernels/warp_ext.comp` | extended-range warp: 4x4 chunks + 6-tap `av2_ext_warped_filter` |
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
@@ -246,8 +249,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT + ADST + IDTX + FLIPADST, 4..32 + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
-- [x] inter scaled reference (steps 1..64), compound A64 blend, warp affine
-      (luma + chroma, regular + extended-range filters)
+- [x] inter scaled reference (steps 1..64), compound A64 blend, weighted (CWP)
+      compound, warp affine (luma + chroma, regular + extended-range filters)
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
 - [x] CCSO block pass + parity gate (1008 cases)
@@ -261,8 +264,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: the DDT experiment types (DDTX/FDDT) and the
-  64-wide transform sizes, the weighted (CWP) compound path, and loop
-  restoration. Note that AVM 1.0's
+  64-wide transform sizes, and loop restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
   and it needs the feature/class context; that port is a separate effort.
