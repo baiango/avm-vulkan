@@ -51,6 +51,20 @@ int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
                            const int *mat_h, uint16_t *dest, int stride,
                            int rows, char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Any transform size, including the 64-wide/tall ones: the 1D pass runs at
+ * min(32, tx_w) x min(32, tx_h) with mat_w / mat_h (the 32-point kernels for
+ * a 64 side), and the kernel replicates each output sample twice in the
+ * direction(s) that exceed 32, as inv_txfm_c() does. coeffs holds n blocks of
+ * tx_w * tx_h values; only the first min(32, tx_w) * min(32, tx_h) of each are
+ * transformed, which is also what the C reference does.
+ */
+int avm_gpu_itxfm_add_tx(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
+                         const int32_t *coeffs, const uint32_t *dst_off, int n,
+                         int tx_w, int tx_h, int bd, const int *mat_w,
+                         const int *mat_h, uint16_t *dest, int stride,
+                         int rows, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_itxfm_add_m(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
                         const int32_t *coeffs, const uint32_t *dst_off, int n,
                         int size, int bd, const int *matrix, uint16_t *dest,

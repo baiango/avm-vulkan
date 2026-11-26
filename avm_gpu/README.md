@@ -2,7 +2,7 @@
 
 Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
 `highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST, IDTX, FLIPADST and the DDT substitutions,
-square and rectangular 4..32) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
+square and rectangular 4..64) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel convolve (unscaled and
 scaled), compound A64 mask blending, weighted (CWP) compound and affine
 (warped) prediction (regular and extended-range filters), generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
@@ -99,7 +99,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
 | `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
-| `vulkan_itxfm.{h,c}` | batched inverse DCT 4x4/8x8 with reconstruction add |
+| `vulkan_itxfm.{h,c}` | batched inverse DCT 4..64 with reconstruction add (`avm_gpu_itxfm_add_tx()` for the 64-wide/tall sizes) |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference, and compound A64 blending |
 | `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
@@ -108,7 +108,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
-| `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix |
+| `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix, plus the 2x replicate of the 64-wide/tall sizes |
 | `kernels/inter.comp` | 8-tap separable subpel filter, one invocation per pixel |
 | `kernels/compound.comp` | A64 mask blend of two predictors (mask subsampling included) |
 | `kernels/cwp.comp` | weighted (CWP) compound average, `avm_highbd_cwp_c` |
@@ -338,7 +338,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
 - [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability, edges)
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
-- [x] inverse DCT + ADST + IDTX + FLIPADST + DDT, 4..32 + parity gate
+- [x] inverse DCT + ADST + IDTX + FLIPADST + DDT, 4..32, and all 9 64-wide/tall
+      sizes + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
 - [x] inter scaled reference (steps 1..64), compound A64 blend, weighted (CWP)
       compound, warp affine (luma + chroma, regular + extended-range filters)
@@ -361,8 +362,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
-- Kernel families still missing: the 64-wide transform sizes and loop
-  restoration. Note that AVM 1.0's
+- Kernel families still missing: loop restoration (and the forward DCT only
+  covers 4x4/8x8). Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
   and it needs the feature/class context; that port is a separate effort.

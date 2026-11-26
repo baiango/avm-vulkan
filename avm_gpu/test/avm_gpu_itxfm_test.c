@@ -225,6 +225,84 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
   return 0;
 }
 
+/* 64-wide/tall blocks: inv_txfm_c() runs the 1D pass at 32 samples per axis
+ * (min(32, tx_w)) and then replicates each output sample twice. */
+static int check_block64(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int txw, int txh,
+                         TX_SIZE tx_size, int *failures) {
+  char err[AVM_GPU_ERR_LEN];
+  const int tw = txw > 32 ? 32 : txw;
+  const int th = txh > 32 ? 32 : txh;
+  const int n = txw * txh;
+  uint16_t *ref = malloc(sizeof(uint16_t) * STRIDE * H);
+  uint16_t *gpu = malloc(sizeof(uint16_t) * STRIDE * H);
+  int32_t *coeffs = malloc((size_t)BLOCKS * n * sizeof(*coeffs));
+  uint32_t *pos = malloc(BLOCKS * sizeof(*pos));
+  if (!ref || !gpu || !coeffs || !pos) return -1;
+
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < STRIDE; x++) ref[y * STRIDE + x] = (uint16_t)(rnd() & 0x3ff);
+  }
+  memcpy(gpu, ref, sizeof(uint16_t) * STRIDE * H);
+
+  const int gx = W / txw, gy = H / txh;
+  int blocks = gx * gy;
+  if (blocks > BLOCKS) blocks = BLOCKS;
+  for (int i = 0; i < blocks; i++) {
+    const int x = (i % gx) * txw;
+    const int y = (i / gx) * txh;
+    pos[i] = (uint32_t)(y * STRIDE + x);
+    for (int k = 0; k < n; k++) {
+      coeffs[(size_t)i * n + k] = (int32_t)(rnd() % 8193) - 4096;
+    }
+  }
+
+  TxfmParam param;
+  memset(&param, 0, sizeof(param));
+  param.tx_size = tx_size;
+  param.primary_tx_type = DCT_DCT;
+  param.bd = BD;
+  param.eob = n;
+  param.lossless = 0;
+  param.use_ddt = 0;
+  param.is_inter = 0;
+
+  const double t0 = now_ms();
+  for (int i = 0; i < blocks; i++) {
+    inv_txfm_c(coeffs + (size_t)i * n, ref + pos[i], STRIDE, &param);
+  }
+  const double cpu_ms = now_ms() - t0;
+
+  const double t1 = now_ms();
+  if (avm_gpu_itxfm_add_tx(ctx, it, coeffs, pos, blocks, txw, txh, BD,
+                           matrix_for(tw), matrix_for(th), gpu, STRIDE, H,
+                           err) != 0) {
+    fprintf(stderr, "avm_gpu itxfm: %s\n", err);
+    return -1;
+  }
+  const double gpu_ms = now_ms() - t1;
+
+  int diff = 0;
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < STRIDE; x++) {
+      if (ref[y * STRIDE + x] != gpu[y * STRIDE + x]) {
+        if (diff < 3) {
+          printf("  %dx%d (%d,%d): gpu %u != cpu %u\n", txw, txh, x, y,
+                 gpu[y * STRIDE + x], ref[y * STRIDE + x]);
+        }
+        diff++;
+      }
+    }
+  }
+  *failures += diff != 0;
+  printf("%2dx%-3d %-10s %6d %7.3f %7.3f %s\n", txw, txh, "DCT_DCT(64)",
+         blocks, cpu_ms, gpu_ms, diff ? "MISMATCH" : "ok");
+  free(ref);
+  free(gpu);
+  free(coeffs);
+  free(pos);
+  return 0;
+}
+
 int main(void) {
   static const struct {
     int w, h;
@@ -360,6 +438,22 @@ int main(void) {
                                          : matrix_for(kDdt[i].h);
     if (check_block(ctx, it, kDdt[i].w, kDdt[i].h, kDdt[i].tx, kDdt[i].ttype,
                     1, mrow, mcol, &failures) != 0) {
+      return 1;
+    }
+  }
+
+  /* 64-wide/tall transforms: 32-sample 1D pass + 2x replicate. */
+  static const struct {
+    int txw, txh;
+    TX_SIZE tx;
+  } kSizes64[] = {
+    { 64, 64, TX_64X64 }, { 64, 32, TX_64X32 }, { 32, 64, TX_32X64 },
+    { 64, 16, TX_64X16 }, { 16, 64, TX_16X64 }, { 64, 8, TX_64X8 },
+    { 8, 64, TX_8X64 },   { 64, 4, TX_64X4 },   { 4, 64, TX_4X64 },
+  };
+  for (size_t i = 0; i < sizeof(kSizes64) / sizeof(kSizes64[0]); i++) {
+    if (check_block64(ctx, it, kSizes64[i].txw, kSizes64[i].txh,
+                      kSizes64[i].tx, &failures) != 0) {
       return 1;
     }
   }

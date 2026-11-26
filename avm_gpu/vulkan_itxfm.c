@@ -34,6 +34,7 @@ struct avm_gpu_itxfm {
 
 typedef struct push_constants {
   uint32_t w, h, bd, stride, count, shift1, shift2, sqrt2;
+  uint32_t out_w, out_h;
 } push_constants;
 
 typedef struct block_pos {
@@ -108,6 +109,10 @@ static void shift_pair(int w, int h, uint32_t *s1, uint32_t *s2) {
     { 32, 16, 6, 12 }, { 4, 16, 6, 12 },  { 16, 4, 6, 12 },
     { 8, 32, 6, 13 },  { 32, 8, 6, 13 },  { 4, 32, 7, 11 },
     { 32, 4, 7, 11 },
+    /* 64-wide/tall sizes: inv_tx_shift[TX_*] for the 64 row. */
+    { 64, 64, 6, 13 }, { 64, 32, 6, 12 }, { 32, 64, 6, 12 },
+    { 16, 64, 6, 13 }, { 64, 16, 6, 13 }, { 8, 64, 6, 12 },
+    { 64, 8, 6, 12 },  { 4, 64, 6, 13 },  { 64, 4, 6, 13 },
   };
   *s1 = 7;
   *s2 = 10;
@@ -120,20 +125,27 @@ static void shift_pair(int w, int h, uint32_t *s1, uint32_t *s2) {
   }
 }
 
-int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
-                           const int32_t *coeffs, const uint32_t *dst_off,
-                           int n, int w, int h, int bd, const int *mat_w,
-                           const int *mat_h, uint16_t *dest, int stride,
-                           int rows, char err[AVM_GPU_ERR_LEN]) {
+/* tx_w/tx_h are the block's transform size (4..64 in steps of 4); the 1D pass
+ * runs at w = min(32, tx_w), h = min(32, tx_h) and the kernel replicates the
+ * result, exactly as inv_txfm_c() does. */
+static int add_tx(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, const int32_t *coeffs,
+                  const uint32_t *dst_off, int n, int tx_w, int tx_h, int bd,
+                  const int *mat_w, const int *mat_h, uint16_t *dest,
+                  int stride, int rows, char err[AVM_GPU_ERR_LEN]) {
   if (n <= 0) return 0;
-  if (w < 4 || h < 4 || w > 32 || h > 32 || (w & 3) || (h & 3)) {
-    snprintf(err, AVM_GPU_ERR_LEN, "unsupported transform size %dx%d", w, h);
+  if (tx_w < 4 || tx_h < 4 || tx_w > 64 || tx_h > 64 || (tx_w & 3) ||
+      (tx_h & 3)) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported transform size %dx%d", tx_w,
+             tx_h);
     return -1;
   }
-  if (!coeffs || !dst_off || !dest || stride < w || rows < h) {
+  if (!coeffs || !dst_off || !dest || stride < tx_w || rows < tx_h) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
   }
+  const int w = tx_w > 32 ? 32 : tx_w;
+  const int h = tx_h > 32 ? 32 : tx_h;
+  const size_t coef_per_block = (size_t)tx_w * (size_t)tx_h;
 
   const size_t pixels = (size_t)stride * rows;
   if (pixels > it->plane_cap) {
@@ -153,11 +165,11 @@ int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
     return -1;
   }
   for (int i = 0; i < n; i++) {
-    pos[i].src_off = (uint32_t)i * (uint32_t)(w * h);
+    pos[i].src_off = (uint32_t)((size_t)i * coef_per_block);
     pos[i].dst_off = dst_off[i];
   }
 
-  const VkDeviceSize coef_bytes = (VkDeviceSize)n * (VkDeviceSize)w * h * 4;
+  const VkDeviceSize coef_bytes = (VkDeviceSize)n * coef_per_block * 4;
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*pos);
   const VkDeviceSize dst_bytes = (VkDeviceSize)pixels * 4;
   const VkDeviceSize mat_bytes = (VkDeviceSize)(w * w + h * h) * 4;
@@ -185,11 +197,12 @@ int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
 
   const avm_gpu_buf bufs[4] = { it->coef, it->pos, it->dst, it->mat };
   uint32_t s1 = 7, s2 = 10;
-  shift_pair(w, h, &s1, &s2);
-  const int sqrt2 = ((log2_of(w) + log2_of(h)) & 1) ? 1 : 0;
-  push_constants pc = { (uint32_t)w,   (uint32_t)h,   (uint32_t)bd,
-                        (uint32_t)stride, (uint32_t)n, s1, s2,
-                        (uint32_t)sqrt2 };
+  shift_pair(tx_w, tx_h, &s1, &s2);
+  const int sqrt2 = ((log2_of(tx_w) + log2_of(tx_h)) & 1) ? 1 : 0;
+  push_constants pc = { (uint32_t)w,      (uint32_t)h,    (uint32_t)bd,
+                        (uint32_t)stride, (uint32_t)n,    s1,
+                        s2,               (uint32_t)sqrt2,
+                        (uint32_t)tx_w,   (uint32_t)tx_h };
   const uint32_t groups = (uint32_t)((n + ITXFM_WORKGROUP - 1) / ITXFM_WORKGROUP);
   rc = avm_gpu_pipeline_dispatch(ctx, it->pipe, bufs, 4, &pc, sizeof(pc),
                                  groups, err);
@@ -198,6 +211,24 @@ int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
   const uint32_t *res = it->dst.mapped;
   for (size_t i = 0; i < pixels; i++) dest[i] = (uint16_t)res[i];
   return 0;
+}
+
+int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
+                           const int32_t *coeffs, const uint32_t *dst_off,
+                           int n, int w, int h, int bd, const int *mat_w,
+                           const int *mat_h, uint16_t *dest, int stride,
+                           int rows, char err[AVM_GPU_ERR_LEN]) {
+  return add_tx(ctx, it, coeffs, dst_off, n, w, h, bd, mat_w, mat_h, dest,
+                stride, rows, err);
+}
+
+int avm_gpu_itxfm_add_tx(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
+                         const int32_t *coeffs, const uint32_t *dst_off, int n,
+                         int tx_w, int tx_h, int bd, const int *mat_w,
+                         const int *mat_h, uint16_t *dest, int stride,
+                         int rows, char err[AVM_GPU_ERR_LEN]) {
+  return add_tx(ctx, it, coeffs, dst_off, n, tx_w, tx_h, bd, mat_w, mat_h,
+                dest, stride, rows, err);
 }
 
 int avm_gpu_itxfm_add_m(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
