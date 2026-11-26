@@ -4,7 +4,7 @@ Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
 `highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST, IDTX and FLIPADST primary types, square and
 rectangular 4..32) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel convolve (unscaled and
-scaled) and compound A64 mask blending, generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
+scaled), compound A64 mask blending and affine (warped) prediction, generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
 **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
@@ -69,6 +69,11 @@ and throughput is not claimed — this milestone is about correctness.
   `test/avm_gpu_ccso_test.c`).
 - `avm_gpu_inter_blend_a64()` matches `avm_highbd_blend_a64_mask_c()` for all
   four mask subsampling modes (gate: `test/avm_gpu_inter_test.c`).
+- `avm_gpu_warp_affine()` matches `av2_highbd_warp_affine_c()` for the
+  single-reference luma case: 3 affine matrices x 3 shear settings x 4 block
+  sizes, whole prediction plane compared (gate: `test/avm_gpu_warp_test.c`).
+  MoltenVK has no `shaderInt64`, so the affine projection uses
+  `imulExtended` with explicit hi/lo carry.
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -84,6 +89,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4x4/8x8 with reconstruction add |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference, and compound A64 blending |
+| `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
@@ -93,6 +99,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix |
 | `kernels/inter.comp` | 8-tap separable subpel filter, one invocation per pixel |
 | `kernels/compound.comp` | A64 mask blend of two predictors (mask subsampling included) |
+| `kernels/warp.comp` | affine projection (64-bit products via `imulExtended`) + 8-tap warp filter |
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
@@ -103,7 +110,8 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_txfm_test.c` | parity gate against `avm_fdct4x4_c` / `avm_highbd_fdct8x8_c` |
 | `test/avm_gpu_intra_test.c` | parity gate against the `avm_highbd_*_predictor_*` set, plus rule/edge checks |
 | `test/avm_gpu_itxfm_test.c` | parity gate against `inv_txfm_c()` |
-| `test/avm_gpu_inter_test.c` | parity gate against `avm_highbd_convolve8_c()` |
+| `test/avm_gpu_inter_test.c` | parity gate against `avm_highbd_convolve8_c()` and the A64 blend |
+| `test/avm_gpu_warp_test.c` | parity gate against `av2_highbd_warp_affine_c()` |
 | `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair |
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
@@ -230,6 +238,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT + ADST + IDTX + FLIPADST, 4..32 + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
+- [x] inter scaled reference (steps 1..64), compound A64 blend, warp affine
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
 - [x] CCSO block pass + parity gate (1008 cases)
@@ -243,8 +252,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: the DDT experiment types (DDTX/FDDT) and the
-  64-wide transform sizes, warp inter and the weighted (CWP) compound path,
-  and loop restoration. Note that AVM 1.0's
+  64-wide transform sizes, chroma warp (subsampled projection) and the
+  extended-range warp filter, the weighted (CWP) compound path, and loop
+  restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
   and it needs the feature/class context; that port is a separate effort.
