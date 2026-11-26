@@ -1,0 +1,58 @@
+#version 450
+// Inter prediction: 8-tap separable subpel convolution, one invocation per
+// output pixel.
+//
+// Mirrors avm_dsp/avm_convolve.c avm_highbd_convolve8_c() for the common
+// x_step_q4 = y_step_q4 = 16 (no scaling) case:
+//   horizontal: sum(fh[k] * src[.. x + k - 3]) -> clip(ROUND_POWER_OF_TWO(., 7))
+//   vertical  : sum(fv[k] * temp[.. y + k - 3]) -> clip(ROUND_POWER_OF_TWO(., 7))
+// with AVM's clip_pixel_highbd between and after the two passes.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint s[]; };
+layout(std430, binding = 1) readonly buffer Filt { int f[]; };
+layout(std430, binding = 2) writeonly buffer Dst { uint d[]; };
+
+layout(push_constant) uniform PC {
+  uint src_stride;
+  uint dst_stride;
+  uint sx;
+  uint sy;
+  uint w;
+  uint h;
+  uint bd;
+  uint x0;  // horizontal subpel position, 0..15
+  uint y0;  // vertical subpel position, 0..15
+} pc;
+
+int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
+
+void main() {
+  const int x = int(gl_GlobalInvocationID.x);
+  const int y = int(gl_GlobalInvocationID.y);
+  if (x >= int(pc.w) || y >= int(pc.h)) return;
+
+  const int maxv = (1 << int(pc.bd)) - 1;
+  const int ss = int(pc.src_stride);
+  const int ds = int(pc.dst_stride);
+  const int sxp = int(pc.sx);
+  const int syp = int(pc.sy);
+  const int fh = int(pc.x0) * 8;
+  const int fv = int(pc.y0) * 8;
+
+  int temp[8];
+  for (int ky = 0; ky < 8; ++ky) {
+    const int row = syp + y + ky - 3;
+    int sum = 0;
+    for (int kx = 0; kx < 8; ++kx) {
+      const int col = sxp + x + kx - 3;
+      sum += f[fh + kx] * int(s[row * ss + col]);
+    }
+    temp[ky] = clipval((sum + 64) >> 7, maxv);
+  }
+
+  int vsum = 0;
+  for (int ky = 0; ky < 8; ++ky) vsum += f[fv + ky] * temp[ky];
+  d[y * ds + x] = uint(clipval((vsum + 64) >> 7, maxv));
+}

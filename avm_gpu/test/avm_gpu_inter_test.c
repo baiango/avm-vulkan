@@ -1,0 +1,123 @@
+/*
+ * Copyright (c) 2021, Alliance for Open Media. All rights reserved
+ *
+ * This source code is subject to the terms of the BSD 3-Clause Clear License
+ * and the Alliance for Open Media Patent License 1.0. If the BSD 3-Clause Clear
+ * License was not distributed with this source code in the LICENSE file, you
+ * can obtain it at aomedia.org/license/software-license/bsd-3-c-c/.  If the
+ * Alliance for Open Media Patent License 1.0 was not distributed with this
+ * source code in the PATENTS file, you can obtain it at
+ * aomedia.org/license/patent-license/.
+ */
+
+/*
+ * Parity gate for the Vulkan inter convolve kernel against
+ * avm_highbd_convolve8_c (avm_dsp/avm_convolve.c).
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "config/avm_dsp_rtcd.h"
+#include "av2/common/filter.h"
+
+#include "avm_gpu/vulkan_gpu.h"
+#include "avm_gpu/vulkan_inter.h"
+
+#define SRC_W 128
+#define SRC_H 128
+#define DST_STRIDE 64
+#define BD 10
+
+static unsigned int rng_state = 0x7f4a7c15u;
+static unsigned int rnd(void) {
+  rng_state = rng_state * 1664525u + 1013904223u;
+  return rng_state >> 8;
+}
+
+static double now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+int main(void) {
+  static const int kPos[6][2] = { { 0, 0 },  { 1, 0 }, { 0, 7 },
+                                  { 8, 8 },  { 15, 15 }, { 3, 9 } };
+  static const int kSizes[5] = { 4, 8, 16, 32, 64 };
+
+  char err[AVM_GPU_ERR_LEN];
+  avm_gpu_ctx *ctx = NULL;
+  if (avm_gpu_ctx_create(&ctx, err) != 0) {
+    fprintf(stderr, "avm_gpu: %s\n", err);
+    return 77; /* skip: no Vulkan device */
+  }
+  avm_gpu_inter *inter = NULL;
+  if (avm_gpu_inter_create(ctx, &inter, err) != 0) {
+    fprintf(stderr, "avm_gpu inter: %s\n", err);
+    avm_gpu_ctx_destroy(ctx);
+    return 1;
+  }
+  printf("device: %s\n", avm_gpu_device_name(ctx));
+  printf("%-8s %-6s %10s %10s %s\n", "subpel", "block", "cpu ms", "gpu ms",
+         "parity");
+
+  uint16_t *plane = malloc(sizeof(uint16_t) * SRC_W * SRC_H);
+  if (!plane) return 1;
+  for (int i = 0; i < SRC_W * SRC_H; i++) plane[i] = (uint16_t)(rnd() & 0x3ff);
+
+  int failures = 0;
+  uint16_t cpu[64 * DST_STRIDE], gpu[64 * DST_STRIDE];
+
+  for (size_t p = 0; p < sizeof(kPos) / sizeof(kPos[0]); p++) {
+    for (size_t s = 0; s < sizeof(kSizes) / sizeof(kSizes[0]); s++) {
+      const int n = kSizes[s];
+      const int sx = 5 + (int)(rnd() % 7);
+      const int sy = 5 + (int)(rnd() % 7);
+
+      memset(cpu, 0, sizeof(cpu));
+      memset(gpu, 0, sizeof(gpu));
+
+      const double t0 = now_ms();
+      avm_highbd_convolve8_c(plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE,
+                             av2_sub_pel_filters_8, kPos[p][0], 16, kPos[p][1],
+                             16, n, n, BD);
+      const double cpu_ms = now_ms() - t0;
+
+      const double t1 = now_ms();
+      if (avm_gpu_inter_convolve(ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                                 (const int16_t *)av2_sub_pel_filters_8,
+                                 kPos[p][0], kPos[p][1], n, n, BD, gpu,
+                                 DST_STRIDE, err) != 0) {
+        fprintf(stderr, "avm_gpu inter: %s\n", err);
+        return 1;
+      }
+      const double gpu_ms = now_ms() - t1;
+
+      int diff = 0;
+      for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+          if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) {
+            if (diff < 3) {
+              printf("  subpel(%d,%d) %dx%d (%d,%d): gpu %u != cpu %u\n",
+                     kPos[p][0], kPos[p][1], n, n, x, y,
+                     gpu[y * DST_STRIDE + x], cpu[y * DST_STRIDE + x]);
+            }
+            diff++;
+          }
+        }
+      }
+      failures += diff != 0;
+      printf("(%2d,%2d)  %-6d %10.3f %10.3f %s\n", kPos[p][0], kPos[p][1], n,
+             cpu_ms, gpu_ms, diff ? "MISMATCH" : "ok");
+    }
+  }
+
+  free(plane);
+  avm_gpu_inter_destroy(ctx, inter);
+  avm_gpu_ctx_destroy(ctx);
+  printf("\n%s\n", failures ? "FAILED" : "ALL PARITY CASES PASSED");
+  return failures ? 1 : 0;
+}
