@@ -207,7 +207,7 @@ documentation. This section is the short version.
 | intra DC/V/H/DC_LEFT/DC_TOP/DC_128/SMOOTH/SMOOTH_V/SMOOTH_H/PAETH (`intra.comp`) | matches `avm_highbd_*_predictor_*_c`, 10 modes × 4x4…64x64, plus availability rule and clamped edges | `avm_gpu_intra_test` |
 | directional intra zones 1-3 (`intra_dir.comp`) | matches `av2_highbd_dr_prediction_z{1,2,3}_c`, 6 angle configs × 5 sizes × mrl 0-2 | `avm_gpu_intra_test` |
 | inverse DCT + ADST + IDTX + FLIPADST, 4…32 (`itxfm.comp`) | matches `inv_txfm_c()` for DCT on 16 sizes plus 62 ADST/IDTX/FLIPADST type/size combinations | `avm_gpu_itxfm_test` |
-| inter 8-tap subpel, unscaled + scaled reference (`inter.comp`) | matches `avm_highbd_convolve8_c()` for any step 1…64, 120 cases | `avm_gpu_inter_test` |
+| inter subpel (unscaled + scaled) and compound blend (`inter.comp`, `compound.comp`) | matches `avm_highbd_convolve8_c()` for any step 1…64 and `avm_highbd_blend_a64_mask_c()` for all mask subsampling modes, 140 cases | `avm_gpu_inter_test` |
 | generic deblock (`deblock.comp`) | matches `avm_highbd_lpf_{horizontal,vertical}_generic_c()`, 378 combinations of width/threshold/flags/orientation | `avm_gpu_deblock_test` |
 | CDEF block filter (`cdef.comp`) | matches `av2_cdef_filter_16_{0,1,2,3}_c`, 5760 combinations of direction/strength/damping/shift/variant | `avm_gpu_cdef_test` |
 | CCSO block pass (`ccso.comp`) | matches `ccso_filter_block_hbd_wo_buf_c()`, 1008 combinations of support/classifier/thresholds/bands/block size | `avm_gpu_ccso_test` |

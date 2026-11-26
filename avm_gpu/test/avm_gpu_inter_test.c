@@ -21,6 +21,7 @@
 #include <time.h>
 
 #include "config/avm_dsp_rtcd.h"
+#include "avm_dsp/blend.h"
 #include "av2/common/filter.h"
 
 #include "avm_gpu/vulkan_gpu.h"
@@ -119,7 +120,7 @@ int main(void) {
    * output pixel uses its own fractional phase. */
   static const int kSteps[5][2] = { { 16, 16 }, { 20, 16 }, { 16, 20 },
                                     { 24, 24 }, { 32, 32 } };
-  static const int kSxTab[4] = { 3, 5, 7, 11 };
+  static const int kSxTab[5] = { 3, 5, 7, 11, 13 };
   for (size_t st = 0; st < 5; st++) {
     for (size_t p = 0; p < sizeof(kPos) / sizeof(kPos[0]); p++) {
       for (size_t s = 0; s < 3; s++) {
@@ -155,6 +156,45 @@ int main(void) {
       }
     }
   }
+
+  /* Compound prediction: A64 mask blend of two predictors. */
+  uint16_t *src1p = malloc(sizeof(uint16_t) * SRC_W * SRC_H);
+  uint8_t *maskbuf = malloc(2 * 64 * 2 * 64);
+  if (!src1p || !maskbuf) return 1;
+  for (int i = 0; i < SRC_W * SRC_H; i++) src1p[i] = (uint16_t)(rnd() & 0x3ff);
+
+  for (int subw = 0; subw < 2; subw++) {
+    for (int subh = 0; subh < 2; subh++) {
+      for (size_t si = 0; si < sizeof(kSizes) / sizeof(kSizes[0]); si++) {
+        const int n = kSizes[si];
+        const int mw = subw ? 2 * n : n;
+        const int mh = subh ? 2 * n : n;
+        for (int i = 0; i < mw * mh; i++) maskbuf[i] = (uint8_t)(rnd() % 65);
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+
+        avm_highbd_blend_a64_mask_c(cpu, DST_STRIDE, plane, SRC_W, src1p,
+                                    SRC_W, maskbuf, mw, n, n, subw, subh, BD);
+        if (avm_gpu_inter_blend_a64(ctx, inter, plane, SRC_W, src1p, SRC_W,
+                                    maskbuf, mw, n, n, subw, subh, BD, gpu,
+                                    DST_STRIDE, err) != 0) {
+          fprintf(stderr, "avm_gpu blend: %s\n", err);
+          return 1;
+        }
+        int diff = 0;
+        for (int y = 0; y < n; y++) {
+          for (int x = 0; x < n; x++) {
+            if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) diff++;
+          }
+        }
+        failures += diff != 0;
+        printf("blend sub%dx%d %-3d %9s %s\n", subw, subh, n, "-",
+               diff ? "MISMATCH" : "ok");
+      }
+    }
+  }
+  free(src1p);
+  free(maskbuf);
 
   free(plane);
   avm_gpu_inter_destroy(ctx, inter);

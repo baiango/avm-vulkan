@@ -40,6 +40,17 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *inter);
  * x_step_q4 / y_step_q4 in 1..64 is supported; the source border needed by the
  * 8-tap filter grows with the scale factor and is checked on entry.
  */
+/*
+ * Compound prediction: A64 mask blend of two predictors, matching
+ * avm_highbd_blend_a64_mask_c() (mask subsampling subw/subh included).
+ */
+int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
+                            const uint16_t *src0, int s0_stride,
+                            const uint16_t *src1, int s1_stride,
+                            const uint8_t *mask, int mask_stride, int w, int h,
+                            int subw, int subh, int bd, uint16_t *dst,
+                            int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                                   const uint16_t *src, int src_stride,
                                   int src_rows, int sx, int sy,

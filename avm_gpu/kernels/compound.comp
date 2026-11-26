@@ -1,0 +1,54 @@
+#version 450
+// Compound inter prediction: A64 mask blend of two predictors, one
+// invocation per output pixel.
+//
+// Mirrors avm_dsp/blend_a64_mask.c avm_highbd_blend_a64_mask_c():
+//   m = mask (optionally averaged from 2x2, 1x2 or 2x1 mask samples)
+//   dst = ROUND_POWER_OF_TWO(m * src0 + (64 - m) * src1, 6)
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Src0 { uint s0[]; };
+layout(std430, binding = 1) readonly buffer Src1 { uint s1[]; };
+layout(std430, binding = 2) readonly buffer Mask { uint mk[]; };
+layout(std430, binding = 3) writeonly buffer Dst { uint d[]; };
+
+layout(push_constant) uniform PC {
+  uint s0_stride;
+  uint s1_stride;
+  uint dst_stride;
+  uint mask_stride;
+  uint w;
+  uint h;
+  uint subw;
+  uint subh;
+  uint bd;
+  uint pad;
+} pc;
+
+int at(uint idx) { return int(mk[idx]); }
+
+void main() {
+  const int x = int(gl_GlobalInvocationID.x);
+  const int y = int(gl_GlobalInvocationID.y);
+  if (x >= int(pc.w) || y >= int(pc.h)) return;
+
+  const int ms = int(pc.mask_stride);
+  int m;
+  if (pc.subw == 0u && pc.subh == 0u) {
+    m = at(uint(y * ms + x));
+  } else if (pc.subw == 1u && pc.subh == 1u) {
+    m = (at(uint((2 * y) * ms + 2 * x)) + at(uint((2 * y + 1) * ms + 2 * x)) +
+         at(uint((2 * y) * ms + 2 * x + 1)) +
+         at(uint((2 * y + 1) * ms + 2 * x + 1)) + 2) >> 2;
+  } else if (pc.subw == 1u) {
+    m = (at(uint(y * ms + 2 * x)) + at(uint(y * ms + 2 * x + 1)) + 1) >> 1;
+  } else {
+    m = (at(uint((2 * y) * ms + x)) + at(uint((2 * y + 1) * ms + x)) + 1) >> 1;
+  }
+
+  const int a = int(s0[uint(y) * pc.s0_stride + uint(x)]);
+  const int b = int(s1[uint(y) * pc.s1_stride + uint(x)]);
+  /* AVM_BLEND_A64: mask 64 means src0, mask 0 means src1. */
+  d[uint(y) * pc.dst_stride + uint(x)] = uint((m * a + (64 - m) * b + 32) >> 6);
+}

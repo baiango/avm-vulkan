@@ -33,6 +33,7 @@ set(AVM_GPU_INTER_SPV "${AVM_GPU_SPV_DIR}/inter.spv")
 set(AVM_GPU_DEBLOCK_SPV "${AVM_GPU_SPV_DIR}/deblock.spv")
 set(AVM_GPU_CDEF_SPV "${AVM_GPU_SPV_DIR}/cdef.spv")
 set(AVM_GPU_CCSO_SPV "${AVM_GPU_SPV_DIR}/ccso.spv")
+set(AVM_GPU_COMPOUND_SPV "${AVM_GPU_SPV_DIR}/compound.spv")
 
 add_custom_command(
   OUTPUT "${AVM_GPU_SAD_SPV}"
@@ -111,6 +112,14 @@ add_custom_command(
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/ccso.comp"
   COMMENT "avm_gpu: ccso.comp -> ccso.spv"
   VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_COMPOUND_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/compound.comp" -o
+          "${AVM_GPU_COMPOUND_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/compound.comp"
+  COMMENT "avm_gpu: compound.comp -> compound.spv"
+  VERBATIM)
 add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_VAR_SPV}"
                                           "${AVM_GPU_TXFM_SPV}"
@@ -120,7 +129,8 @@ add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_INTER_SPV}"
                                           "${AVM_GPU_DEBLOCK_SPV}"
                                           "${AVM_GPU_CDEF_SPV}"
-                                          "${AVM_GPU_CCSO_SPV}")
+                                          "${AVM_GPU_CCSO_SPV}"
+                                          "${AVM_GPU_COMPOUND_SPV}")
 
 add_library(
   avm_gpu STATIC
@@ -147,7 +157,8 @@ target_compile_definitions(avm_gpu
                                    AVM_GPU_INTER_SPV_PATH="${AVM_GPU_INTER_SPV}"
                                    AVM_GPU_DEBLOCK_SPV_PATH="${AVM_GPU_DEBLOCK_SPV}"
                                    AVM_GPU_CDEF_SPV_PATH="${AVM_GPU_CDEF_SPV}"
-                                   AVM_GPU_CCSO_SPV_PATH="${AVM_GPU_CCSO_SPV}")
+                                   AVM_GPU_CCSO_SPV_PATH="${AVM_GPU_CCSO_SPV}"
+                                   AVM_GPU_COMPOUND_SPV_PATH="${AVM_GPU_COMPOUND_SPV}")
 # Vulkan structs are initialised by sType; the remaining fields are required
 # to be zero, so the missing-field diagnostic is noise here.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
