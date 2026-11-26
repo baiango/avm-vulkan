@@ -21,17 +21,29 @@
 #ifndef AVM_GPU_INTRA_SPV_PATH
 #define AVM_GPU_INTRA_SPV_PATH "intra.spv"
 #endif
+#ifndef AVM_GPU_INTRA_DIR_SPV_PATH
+#define AVM_GPU_INTRA_DIR_SPV_PATH "intra_dir.spv"
+#endif
 
 #define INTRA_MAX_DIM 64
+/* Guard samples before the top-left, mirroring AVM's extended edge rows. */
+#define INTRA_EDGE_PAD 4
 #define INTRA_WORKGROUP 64
 
 struct avm_gpu_intra {
   avm_gpu_pipeline *pipe;
+  avm_gpu_pipeline *dir_pipe;
   avm_gpu_buf above, left, dst;
+  avm_gpu_buf d_above, d_left, d_dst;
   VkDeviceSize above_cap, left_cap, dst_cap;
+  VkDeviceSize d_above_cap, d_left_cap, d_dst_cap;
   uint32_t *expand;
   size_t expand_cap;
 };
+
+typedef struct dir_push_constants {
+  uint32_t bw, bh, dx, dy, mrl, stride, mode, pad;
+} dir_push_constants;
 
 typedef struct push_constants {
   uint32_t bw, bh, mode, bd, stride, pad;
@@ -60,6 +72,13 @@ int avm_gpu_intra_create(avm_gpu_ctx *ctx, avm_gpu_intra **out,
     free(in);
     return -1;
   }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_INTRA_DIR_SPV_PATH,
+                              "AVM_GPU_INTRA_DIR_SPV", 3,
+                              sizeof(dir_push_constants), &in->dir_pipe,
+                              err) != 0) {
+    avm_gpu_intra_destroy(ctx, in);
+    return -1;
+  }
   *out = in;
   return 0;
 }
@@ -67,9 +86,13 @@ int avm_gpu_intra_create(avm_gpu_ctx *ctx, avm_gpu_intra **out,
 void avm_gpu_intra_destroy(avm_gpu_ctx *ctx, avm_gpu_intra *in) {
   if (!in) return;
   avm_gpu_pipeline_destroy(ctx, in->pipe);
+  avm_gpu_pipeline_destroy(ctx, in->dir_pipe);
   avm_gpu_buf_destroy(ctx, &in->above);
   avm_gpu_buf_destroy(ctx, &in->left);
   avm_gpu_buf_destroy(ctx, &in->dst);
+  avm_gpu_buf_destroy(ctx, &in->d_above);
+  avm_gpu_buf_destroy(ctx, &in->d_left);
+  avm_gpu_buf_destroy(ctx, &in->d_dst);
   free(in->expand);
   free(in);
 }
@@ -158,6 +181,61 @@ int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
   const uint32_t *res = in->dst.mapped;
   for (int y = 0; y < bh; y++) {
     for (int x = 0; x < bw; x++) dst[(size_t)y * stride + x] = res[y * stride + x];
+  }
+  return 0;
+}
+
+int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
+                             const uint16_t *above, const uint16_t *left,
+                             int bw, int bh, int zone, int dx, int dy,
+                             int mrl_index, uint16_t *dst, int stride,
+                             char err[AVM_GPU_ERR_LEN]) {
+  if (bw <= 0 || bh <= 0 || bw > INTRA_MAX_DIM || bh > INTRA_MAX_DIM) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", bw, bh);
+    return -1;
+  }
+  if (zone < 1 || zone > 3) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported directional zone %d", zone);
+    return -1;
+  }
+  if (mrl_index < 0 || mrl_index > 3) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported mrl index %d", mrl_index);
+    return -1;
+  }
+  const int edge_len = bw + bh + 8 + INTRA_EDGE_PAD;
+
+  if (ensure_buf(ctx, &in->d_above, &in->d_above_cap,
+                 (VkDeviceSize)edge_len * 4, err) ||
+      ensure_buf(ctx, &in->d_left, &in->d_left_cap, (VkDeviceSize)edge_len * 4,
+                 err) ||
+      ensure_buf(ctx, &in->d_dst, &in->d_dst_cap,
+                 (VkDeviceSize)stride * bh * 4, err)) {
+    return -1;
+  }
+
+  /* above/left point at the top-left sample; copy the guard window too. */
+  uint32_t *ab = in->d_above.mapped;
+  uint32_t *lf = in->d_left.mapped;
+  for (int i = 0; i < edge_len; i++) {
+    ab[i] = above[i - INTRA_EDGE_PAD];
+    lf[i] = left[i - INTRA_EDGE_PAD];
+  }
+
+  const avm_gpu_buf bufs[3] = { in->d_above, in->d_left, in->d_dst };
+  dir_push_constants pc = { (uint32_t)bw,     (uint32_t)bh,   (uint32_t)dx,
+                            (uint32_t)dy,     (uint32_t)mrl_index,
+                            (uint32_t)stride, (uint32_t)zone, 0 };
+  const uint32_t gx = (uint32_t)((bw + 7) / 8);
+  const uint32_t gy = (uint32_t)((bh + 7) / 8);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->dir_pipe, bufs, 3, &pc,
+                                              sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+
+  const uint32_t *res = in->d_dst.mapped;
+  for (int y = 0; y < bh; y++) {
+    for (int x = 0; x < bw; x++) {
+      dst[(size_t)y * stride + x] = res[y * stride + x];
+    }
   }
   return 0;
 }

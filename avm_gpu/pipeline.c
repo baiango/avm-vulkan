@@ -202,6 +202,14 @@ int avm_gpu_pipeline_dispatch(avm_gpu_ctx *ctx, avm_gpu_pipeline *p,
                               const avm_gpu_buf *bufs, int n_bindings,
                               const void *pc, size_t pc_size, uint32_t groups,
                               char err[AVM_GPU_ERR_LEN]) {
+  return avm_gpu_pipeline_dispatch_2d(ctx, p, bufs, n_bindings, pc, pc_size,
+                                      groups, 1, err);
+}
+
+int avm_gpu_pipeline_dispatch_2d(avm_gpu_ctx *ctx, avm_gpu_pipeline *p,
+                                 const avm_gpu_buf *bufs, int n_bindings,
+                                 const void *pc, size_t pc_size, uint32_t gx,
+                                 uint32_t gy, char err[AVM_GPU_ERR_LEN]) {
   if (n_bindings != p->n_bindings || !bufs) {
     snprintf(err, AVM_GPU_ERR_LEN, "binding count mismatch");
     return -1;
@@ -243,7 +251,7 @@ int avm_gpu_pipeline_dispatch(avm_gpu_ctx *ctx, avm_gpu_pipeline *p,
     vkCmdPushConstants(cb, p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        (uint32_t)pc_size, pc);
   }
-  vkCmdDispatch(cb, groups, 1, 1);
+  vkCmdDispatch(cb, gx, gy, 1);
   vkEndCommandBuffer(cb);
 
   return avm_gpu_submit_wait(ctx, cb, err);

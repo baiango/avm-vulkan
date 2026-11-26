@@ -1,8 +1,9 @@
 # avm_gpu — Vulkan compute backend for AVM
 
 Status: **M0 complete, kernels growing.** Four kernel families (`highbd SAD`,
-`highbd variance/SSE`, forward DCT 4x4/8x8, intra prediction), five gates, and
-an encoder call site that produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
+`highbd variance/SSE`, forward DCT 4x4/8x8, intra prediction with DC/V/H and
+the directional zones 1-3), five gates, and an encoder call site that produces
+**byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
 
@@ -26,7 +27,9 @@ and throughput is not claimed — this milestone is about correctness.
 - `avm_gpu_intra_*` matches `avm_highbd_{dc,v,h,dc_left,dc_top,dc_128}_predictor_*_c`
   for 4x4…64x64 (gate: `test/avm_gpu_intra_test.c`), and carries AVM's block
   availability rule (no neighbours -> DC_128, one side -> DC_LEFT/DC_TOP) plus
-  the frame-clamped edge builder.
+  the frame-clamped edge builder. `avm_gpu_intra_dr_predict()` adds zones 1-3
+  and matches `av2_highbd_dr_prediction_z{1,2,3}_c` over 6 direction/size/mrl
+  combinations x 5 sizes x mrl 0-2, pixel for pixel.
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -42,6 +45,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
+| `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
@@ -168,6 +172,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] variance/SSE kernel + parity gate (3 bitdepths x 9 sizes x 128 candidates)
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
 - [x] intra prediction kernel + parity gate (6 modes x 5 sizes, availability, edges)
+- [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] encoder call site with byte-identical bitstream gate
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
@@ -177,9 +182,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
-- Kernel families still missing: directional (z1/z2/z3) and smooth/paeth intra,
-  inverse transforms, inter (MC/compound/warp), and the loop filters
-  (deblock/CDEF/CCSO/restoration).
+- Kernel families still missing: smooth/paeth intra, inverse transforms, inter
+  (MC/compound/warp), and the loop filters (deblock/CDEF/CCSO/restoration).
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

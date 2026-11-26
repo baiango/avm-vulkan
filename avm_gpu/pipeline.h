@@ -45,6 +45,12 @@ int avm_gpu_pipeline_dispatch(avm_gpu_ctx *ctx, avm_gpu_pipeline *pipe,
                               const void *pc, size_t pc_size, uint32_t groups,
                               char err[AVM_GPU_ERR_LEN]);
 
+/* Same, with an explicit 2D workgroup grid. */
+int avm_gpu_pipeline_dispatch_2d(avm_gpu_ctx *ctx, avm_gpu_pipeline *pipe,
+                                 const avm_gpu_buf *bufs, int n_bindings,
+                                 const void *pc, size_t pc_size, uint32_t gx,
+                                 uint32_t gy, char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

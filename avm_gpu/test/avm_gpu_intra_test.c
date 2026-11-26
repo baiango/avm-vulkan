@@ -26,6 +26,20 @@
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_intra.h"
 
+/* av2/common/reconintra.c defines these without a public header prototype. */
+void av2_highbd_dr_prediction_z1_c(uint16_t *dst, ptrdiff_t stride, int bw,
+                                   int bh, const uint16_t *above,
+                                   const uint16_t *left, int dx, int dy, int bd,
+                                   int mrl_index);
+void av2_highbd_dr_prediction_z2_c(uint16_t *dst, ptrdiff_t stride, int bw,
+                                   int bh, const uint16_t *above,
+                                   const uint16_t *left, int dx, int dy, int bd,
+                                   int mrl_index);
+void av2_highbd_dr_prediction_z3_c(uint16_t *dst, ptrdiff_t stride, int bw,
+                                   int bh, const uint16_t *above,
+                                   const uint16_t *left, int dx, int dy, int bd,
+                                   int mrl_index);
+
 #define STRIDE 80
 #define BD 10
 
@@ -119,6 +133,77 @@ static int check_edges(const uint16_t *plane, int w, int h) {
   return bad;
 }
 
+static int check_directional(avm_gpu_ctx *ctx, avm_gpu_intra *intra) {
+  static const struct {
+    int zone, dx, dy;
+  } dirs[] = {
+    { 1, 12, 1 }, { 1, 32, 1 }, { 2, 20, 15 }, { 2, 7, 9 }, { 3, 1, 9 },
+    { 3, 1, 31 },
+  };
+  char err[AVM_GPU_ERR_LEN];
+  /* 4 guard samples before the top-left, as AVM's edge rows have. */
+  uint16_t above_raw[220], left_raw[220];
+  uint16_t *above = above_raw + 4;
+  uint16_t *left = left_raw + 4;
+  uint16_t cpu[64 * STRIDE], gpu[64 * STRIDE];
+  int failures = 0, cases = 0;
+
+  for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+    for (size_t s = 0; s < 5; s++) {
+      const int n = kSizes[s];
+      for (int mrl = 0; mrl <= 2; mrl++) {
+        for (int i = 0; i < 220; i++) {
+          above_raw[i] = (uint16_t)(rnd() & 0x3ff);
+          left_raw[i] = (uint16_t)(rnd() & 0x3ff);
+        }
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+
+        if (dirs[d].zone == 1) {
+          av2_highbd_dr_prediction_z1_c(cpu, STRIDE, n, n, above, left,
+                                        dirs[d].dx, dirs[d].dy, BD, mrl);
+        } else if (dirs[d].zone == 2) {
+          av2_highbd_dr_prediction_z2_c(cpu, STRIDE, n, n, above, left,
+                                        dirs[d].dx, dirs[d].dy, BD, mrl);
+        } else {
+          av2_highbd_dr_prediction_z3_c(cpu, STRIDE, n, n, above, left,
+                                        dirs[d].dx, dirs[d].dy, BD, mrl);
+        }
+
+        if (avm_gpu_intra_dr_predict(ctx, intra, above, left, n, n,
+                                     dirs[d].zone, dirs[d].dx, dirs[d].dy, mrl,
+                                     gpu, STRIDE, err) != 0) {
+          fprintf(stderr, "avm_gpu intra dir: %s\n", err);
+          return 1;
+        }
+
+        int diff = 0;
+        for (int y = 0; y < n; y++) {
+          for (int x = 0; x < n; x++) {
+            if (cpu[y * STRIDE + x] != gpu[y * STRIDE + x]) {
+              if (diff < 3) {
+                printf("  z%d %dx%d mrl%d (%d,%d): gpu %u != cpu %u\n",
+                       dirs[d].zone, n, n, mrl, x, y, gpu[y * STRIDE + x],
+                       cpu[y * STRIDE + x]);
+              }
+              diff++;
+            }
+          }
+        }
+        cases++;
+        failures += diff != 0;
+        if (diff) {
+          printf("z%d %dx%d mrl%d dx%d dy%d MISMATCH\n", dirs[d].zone, n, n, mrl,
+                 dirs[d].dx, dirs[d].dy);
+        }
+      }
+    }
+  }
+  printf("%-8s %-6s %10s %s\n", "dir", "cases", "compared", failures ? "MISMATCH" : "ok");
+  printf("  directional: %d cases x pixel compare\n", cases);
+  return failures;
+}
+
 int main(void) {
   char err[AVM_GPU_ERR_LEN];
   avm_gpu_ctx *ctx = NULL;
@@ -146,6 +231,7 @@ int main(void) {
     for (int x = 0; x < STRIDE; x++) plane[y * STRIDE + x] = (uint16_t)(rnd() & 0x3ff);
   }
   failures += check_edges(plane, frame_w, frame_h);
+  failures += check_directional(ctx, intra);
 
   uint16_t above[66], left[66];
   uint16_t cpu[64 * STRIDE], gpu[64 * STRIDE];

@@ -1,0 +1,86 @@
+#version 450
+// Directional intra prediction, zones 1-3.
+//
+// Mirrors av2_highbd_dr_prediction_z{1,2,3}_c from av2/common/reconintra.c:
+// same 6-bit fraction, same (x & 0x3F) >> 1 interpolation shift, same
+// ROUND_POWER_OF_TWO(., 5) rounding, same max_base clamps and the same
+// mrl_index offsets. One invocation per output pixel.
+//
+// The C reference indexes above[-1] (top-left) and, for steep zone-2 angles,
+// further left into the extended edge row, so the shader keeps a guard window
+// of EDGE_PAD samples before the top-left exactly like AVM's above_row does.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Above { uint a[]; };
+layout(std430, binding = 1) readonly buffer Left { uint l[]; };
+layout(std430, binding = 2) writeonly buffer Dst { uint d[]; };
+
+layout(push_constant) uniform PC {
+  uint bw;
+  uint bh;
+  uint dx;
+  uint dy;
+  uint mrl;
+  uint stride;
+  uint mode;  // 1 = z1, 2 = z2, 3 = z3
+  uint pad;
+} pc;
+
+#define EDGE_PAD 4
+
+uint ab(int i) { return a[i + EDGE_PAD]; }
+uint lf(int i) { return l[i + EDGE_PAD]; }
+uint rnd5(int v) { return uint((v + 16) >> 5); }
+
+void main() {
+  const int c = int(gl_GlobalInvocationID.x);
+  const int r = int(gl_GlobalInvocationID.y);
+  const int bw = int(pc.bw);
+  const int bh = int(pc.bh);
+  if (c >= bw || r >= bh) return;
+
+  const int mrl = int(pc.mrl);
+  const int dx = int(pc.dx);
+  const int dy = int(pc.dy);
+  const int max_base = bw + bh - 1 + (mrl << 1);
+  uint val;
+
+  if (pc.mode == 1u) {
+    const int x = dx * (1 + mrl + r);
+    const int base = x >> 6;
+    const int shift = (x & 0x3F) >> 1;
+    const int b = base + c;
+    if (b >= max_base) {
+      val = ab(max_base);
+    } else {
+      val = rnd5(int(ab(b)) * (32 - shift) + int(ab(b + 1)) * shift);
+    }
+  } else if (pc.mode == 3u) {
+    const int y = dy * (1 + mrl + c);
+    const int base = y >> 6;
+    const int shift = (y & 0x3F) >> 1;
+    const int b = base + r;
+    if (b >= max_base) {
+      val = lf(max_base);
+    } else {
+      val = rnd5(int(lf(b)) * (32 - shift) + int(lf(b + 1)) * shift);
+    }
+  } else {
+    const int min_base = -1 - mrl;
+    const int y = r + 1;
+    const int x = (c << 6) - (y + mrl) * dx;
+    const int base_x = x >> 6;
+    if (base_x >= min_base) {
+      const int shift = (x & 0x3F) >> 1;
+      val = rnd5(int(ab(base_x)) * (32 - shift) + int(ab(base_x + 1)) * shift);
+    } else {
+      const int yy = (r << 6) - (c + 1 + mrl) * dy;
+      const int base_y = yy >> 6;
+      const int shift = (yy & 0x3F) >> 1;
+      val = rnd5(int(lf(base_y)) * (32 - shift) + int(lf(base_y + 1)) * shift);
+    }
+  }
+
+  d[r * int(pc.stride) + c] = val;
+}

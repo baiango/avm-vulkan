@@ -27,6 +27,7 @@ set(AVM_GPU_SAD_SPV "${AVM_GPU_SPV_DIR}/sad.spv")
 set(AVM_GPU_VAR_SPV "${AVM_GPU_SPV_DIR}/variance.spv")
 set(AVM_GPU_TXFM_SPV "${AVM_GPU_SPV_DIR}/txfm.spv")
 set(AVM_GPU_INTRA_SPV "${AVM_GPU_SPV_DIR}/intra.spv")
+set(AVM_GPU_INTRA_DIR_SPV "${AVM_GPU_SPV_DIR}/intra_dir.spv")
 
 add_custom_command(
   OUTPUT "${AVM_GPU_SAD_SPV}"
@@ -59,10 +60,19 @@ add_custom_command(
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra.comp"
   COMMENT "avm_gpu: intra.comp -> intra.spv"
   VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_INTRA_DIR_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra_dir.comp" -o
+          "${AVM_GPU_INTRA_DIR_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra_dir.comp"
+  COMMENT "avm_gpu: intra_dir.comp -> intra_dir.spv"
+  VERBATIM)
 add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_VAR_SPV}"
                                           "${AVM_GPU_TXFM_SPV}"
-                                          "${AVM_GPU_INTRA_SPV}")
+                                          "${AVM_GPU_INTRA_SPV}"
+                                          "${AVM_GPU_INTRA_DIR_SPV}")
 
 add_library(
   avm_gpu STATIC
@@ -78,7 +88,8 @@ target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
                                    AVM_GPU_VAR_SPV_PATH="${AVM_GPU_VAR_SPV}"
                                    AVM_GPU_TXFM_SPV_PATH="${AVM_GPU_TXFM_SPV}"
-                                   AVM_GPU_INTRA_SPV_PATH="${AVM_GPU_INTRA_SPV}")
+                                   AVM_GPU_INTRA_SPV_PATH="${AVM_GPU_INTRA_SPV}"
+                                   AVM_GPU_INTRA_DIR_SPV_PATH="${AVM_GPU_INTRA_DIR_SPV}")
 # Vulkan structs are initialised by sType; the remaining fields are required
 # to be zero, so the missing-field diagnostic is noise here.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

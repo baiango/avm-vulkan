@@ -205,6 +205,7 @@ documentation. This section is the short version.
 | variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths | `avm_gpu_var_test` |
 | forward DCT 4x4 / 8x8 (`txfm.comp`) | matches `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c` bit-for-bit (64-bit products emulated) | `avm_gpu_txfm_test` |
 | intra DC/V/H/DC_LEFT/DC_TOP/DC_128 (`intra.comp`) | matches `avm_highbd_*_predictor_*_c`, 4x4…64x64, plus availability rule and clamped edges | `avm_gpu_intra_test` |
+| directional intra zones 1-3 (`intra_dir.comp`) | matches `av2_highbd_dr_prediction_z{1,2,3}_c`, 6 angle configs × 5 sizes × mrl 0-2 | `avm_gpu_intra_test` |
 | encoder integration (`vulkan_hook.c`, batched motion search) | `avmenc` with `AV2_GPU_SAD=1` produces a bitstream with the **same md5** as the CPU run and must price >1 block per dispatch | `avm_gpu_encoder_parity` |
 
 Both gates compare **every block** against the reference on random planes with

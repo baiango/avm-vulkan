@@ -61,6 +61,21 @@ void avm_gpu_intra_edges(const uint16_t *plane, int stride, int x, int y,
  * (bw samples) and left (bh samples). Matches
  * avm_highbd_{dc,v,h,dc_left,dc_top,dc_128}_predictor_*_c bit for bit.
  */
+/*
+ * Directional prediction (zones 1-3), matching
+ * av2_highbd_dr_prediction_z{1,2,3}_c. above and left point at the top-left
+ * sample, exactly like the C reference (above[-1] is the top-left, above[0]
+ * the first above sample). The caller must provide VALID samples for
+ * above[-4 .. bw+bh+7] and left[-4 .. bw+bh+7], because steep zone-2 angles
+ * read past the top-left into the extended row, as they do in AVM.
+ * zone is 1, 2 or 3.
+ */
+int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *intra,
+                             const uint16_t *above, const uint16_t *left,
+                             int bw, int bh, int zone, int dx, int dy,
+                             int mrl_index, uint16_t *dst, int stride,
+                             char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *intra,
                           const uint16_t *above, const uint16_t *left, int bw,
                           int bh, int mode, int bd, uint16_t *dst, int stride,
