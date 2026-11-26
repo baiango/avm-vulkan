@@ -37,6 +37,8 @@ extern const int tx_kernel_adst_size16[4][16][16];
 extern const int tx_kernel_fdst_size4[4][4][4];
 extern const int tx_kernel_fdst_size8[4][8][8];
 extern const int tx_kernel_fdst_size16[4][16][16];
+extern const int tx_kernel_ddtx_size8[4][8][8];
+extern const int tx_kernel_ddtx_size16[4][16][16];
 
 #define W 128
 #define H 128
@@ -98,8 +100,24 @@ static const int *adst_for(int n) {
   }
 }
 
+/* DDTX uses tx_kernel_ddtx_sizeN; FDDT is the same matrix with the columns
+ * reversed (see inv_txfm_fddt_sizeN_c). */
+static int g_ddtx[2][32 * 32];
+
+static const int *ddtx_for(int n, int slot, int flipped) {
+  const int *m = n == 8 ? &tx_kernel_ddtx_size8[INV_TXFM][0][0]
+                        : &tx_kernel_ddtx_size16[INV_TXFM][0][0];
+  memset(g_ddtx[slot], 0, sizeof(g_ddtx[slot]));
+  for (int r = 0; r < n; r++) {
+    for (int c = 0; c < n; c++) {
+      g_ddtx[slot][r * n + c] = m[r * n + (flipped ? n - 1 - c : c)];
+    }
+  }
+  return g_ddtx[slot];
+}
+
 static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
-                       TX_SIZE tx_size, PRIMARY_TX_TYPE ttype,
+                       TX_SIZE tx_size, PRIMARY_TX_TYPE ttype, int use_ddt,
                        const int *mat_row, const int *mat_col,
                        int *failures) {
   char err[AVM_GPU_ERR_LEN];
@@ -146,7 +164,7 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
   param.bd = BD;
   param.eob = n;
   param.lossless = 0;
-  param.use_ddt = 0;
+  param.use_ddt = use_ddt;
   param.is_inter = 0;
 
   const double t0 = now_ms();
@@ -182,7 +200,8 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
   }
   *failures += diff != 0;
   printf("%2dx%-3d %-10s %6d %7.3f %7.3f %s\n", w, h,
-         ttype == DCT_DCT   ? "DCT_DCT"
+         use_ddt            ? "DDT"
+         : ttype == DCT_DCT ? "DCT_DCT"
          : ttype == ADST_DCT ? "ADST_DCT"
          : ttype == DCT_ADST ? "DCT_ADST"
          : ttype == ADST_ADST ? "ADST_ADST"
@@ -238,7 +257,7 @@ int main(void) {
   int failures = 0;
   for (size_t i = 0; i < sizeof(kSizes) / sizeof(kSizes[0]); i++) {
     if (check_block(ctx, it, kSizes[i].w, kSizes[i].h, kSizes[i].tx, DCT_DCT,
-                    matrix_for(kSizes[i].w), matrix_for(kSizes[i].h),
+                    0, matrix_for(kSizes[i].w), matrix_for(kSizes[i].h),
                     &failures) != 0) {
       return 1;
     }
@@ -305,7 +324,42 @@ int main(void) {
     mrow = mrow_i;
     mcol = mcol_i;
     if (check_block(ctx, it, kAdst[i].w, kAdst[i].h, kAdst[i].tx,
-                    kAdst[i].ttype, mrow, mcol, &failures) != 0) {
+                    kAdst[i].ttype, 0, mrow, mcol, &failures) != 0) {
+      return 1;
+    }
+  }
+
+  /* DDT: with use_ddt the 8/16-point DST7 (ADST) and DCT8 (FLIPADST) kernels
+   * are replaced by DDTX and FDDT respectively (REPLACE_ADST8/16 == 1,
+   * REPLACE_ADST4 == 0). */
+  static const struct {
+    int w, h;
+    TX_SIZE tx;
+    PRIMARY_TX_TYPE ttype;
+    int row, col; /* 0 DCT, 4 DDTX, 5 FDDT, 1 ADST */
+  } kDdt[] = {
+    { 8, 8, TX_8X8, ADST_DCT, 0, 4 },         { 8, 8, TX_8X8, DCT_ADST, 4, 0 },
+    { 8, 8, TX_8X8, ADST_ADST, 4, 4 },        { 16, 16, TX_16X16, ADST_DCT, 0, 4 },
+    { 16, 16, TX_16X16, DCT_ADST, 4, 0 },     { 16, 16, TX_16X16, ADST_ADST, 4, 4 },
+    { 8, 8, TX_8X8, FLIPADST_DCT, 0, 5 },     { 8, 8, TX_8X8, DCT_FLIPADST, 5, 0 },
+    { 8, 8, TX_8X8, FLIPADST_FLIPADST, 5, 5 },
+    { 16, 16, TX_16X16, FLIPADST_FLIPADST, 5, 5 },
+    { 8, 8, TX_8X8, ADST_FLIPADST, 5, 4 },    { 8, 8, TX_8X8, FLIPADST_ADST, 4, 5 },
+    { 8, 16, TX_8X16, ADST_ADST, 4, 4 },      { 16, 8, TX_16X8, FLIPADST_FLIPADST, 5, 5 },
+    /* 4x4 keeps ADST: REPLACE_ADST4 is 0 in this build. */
+    { 4, 4, TX_4X4, ADST_DCT, 0, 1 },
+  };
+  for (size_t i = 0; i < sizeof(kDdt) / sizeof(kDdt[0]); i++) {
+    const int *mrow = kDdt[i].row == 4   ? ddtx_for(kDdt[i].w, 0, 0)
+                      : kDdt[i].row == 5 ? ddtx_for(kDdt[i].w, 0, 1)
+                      : kDdt[i].row == 1 ? adst_for(kDdt[i].w)
+                                         : matrix_for(kDdt[i].w);
+    const int *mcol = kDdt[i].col == 4   ? ddtx_for(kDdt[i].h, 1, 0)
+                      : kDdt[i].col == 5 ? ddtx_for(kDdt[i].h, 1, 1)
+                      : kDdt[i].col == 1 ? adst_for(kDdt[i].h)
+                                         : matrix_for(kDdt[i].h);
+    if (check_block(ctx, it, kDdt[i].w, kDdt[i].h, kDdt[i].tx, kDdt[i].ttype,
+                    1, mrow, mcol, &failures) != 0) {
       return 1;
     }
   }
