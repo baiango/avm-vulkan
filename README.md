@@ -279,7 +279,7 @@ the integration gate encodes a 3-frame 64×64 clip:
 |---|---:|---|
 | CPU SAD | 1.86 s | md5 `cd833e6f...` |
 | `AV2_GPU_SAD=single`, one dispatch per call | 440.5 s | md5 `cd833e6f...` |
-| `AV2_GPU_SAD=1`, batched, 4 candidates per dispatch (178,249 dispatches) | 73.9 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1`, whole-step batching (80,895 dispatches, 8.8 blocks/dispatch) | 17.7 s | md5 `cd833e6f...` |
 | same + `AVM_GPU_PACK16=1` (packed 16-bit storage) | 35.7 s | md5 `cd833e6f...` |
 
 Batching plus packed 16-bit storage bought 12.3x, but the GPU path is still

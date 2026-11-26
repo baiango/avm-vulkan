@@ -195,16 +195,20 @@ Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 |---|---:|---:|---:|---|
 | CPU SAD | - | - | 1.86 s | 1020 B, md5 `cd833e6f...` |
 | `AV2_GPU_SAD=single` (one dispatch per SAD call) | 1,211,438 | 1,211,438 | 440.5 s | md5 `cd833e6f...` |
-| `AV2_GPU_SAD=1` (batched, 4 candidates per dispatch) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
-| `AV2_GPU_SAD=1 AVM_GPU_PACK16=1` (batched + packed storage) | 712,996 | 178,249 | 35.7 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1` (4-candidate groups) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
+| same + `AVM_GPU_PACK16=1` | 712,996 | 178,249 | 35.7 s | md5 `cd833e6f...` |
+| whole-step batching + packed storage | 714,775 | 80,895 | 17.7 s | md5 `cd833e6f...` |
 
 Batching, the reusable expansion scratch and packed storage took the GPU encode
 from 440.5 s to 35.7 s (12.3x) with the same bitstream. It is still ~19x slower
 than the CPU on this machine: each dispatch costs ~0.2 ms through MoltenVK and
 the block is re-packed per call. The remaining fixes are structural, not micro:
 
-1. Price the **whole search step** (up to 12 candidates) instead of 4-point
-   groups, cutting dispatch count another ~3x.
+1. ~~Price the whole search step instead of 4-point groups.~~ Done: the
+   diamond search now prices every candidate of a step in one dispatch
+   (8.8 blocks/dispatch, 80,895 dispatches, 17.7 s vs 35.7 s). Note that
+   validity is now decided per candidate instead of per group; on the gate clip
+   the bitstream is unchanged.
 2. Keep the **source and reference frames resident** for the duration of a
    block's search instead of re-packing planes per call.
 3. Add the device-local arena so planes are staged once per frame instead of

@@ -1802,55 +1802,67 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
     if (all_in && !mask && !second_pred) {
       const uint16_t *src_buf = src->buf;
       const int src_stride = src->stride;
-      for (int idx = 1; idx <= cfg->searches_per_step[step]; idx += 4) {
-        uint16_t const *block_offset[4];
-        unsigned int sads[4];
+      /* Price the whole search step in one go: the candidates are
+       * independent (same centre, same block size), so a single batched
+       * dispatch replaces the 4-candidate groups of sdx4df. */
+      const int n_cand = cfg->searches_per_step[step];
+      assert(n_cand <= AVM_GPU_HOOK_MAX_BATCH);
+      uint16_t const *cand_off[AVM_GPU_HOOK_MAX_BATCH];
+      unsigned int cand_sad[AVM_GPU_HOOK_MAX_BATCH];
+      int cand_ok[AVM_GPU_HOOK_MAX_BATCH];
 
+      for (j = 0; j < n_cand; j++) {
+        const int idx = j + 1;
         int valid = 1;
-        for (j = 0; j < 4; j++) {
-          if (ms_params->is_intra_mode &&
-              ms_params->cm->features.allow_local_intrabc) {
-            MV sub_mv = { (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
-                              best_mv->row + site[idx + j].mv.row),
-                          (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
-                              best_mv->col + site[idx + j].mv.col) };
-            valid &= av2_is_dv_valid(
-                sub_mv, ms_params->cm, ms_params->xd, ms_params->mi_row,
-                ms_params->mi_col, ms_params->bsize, ms_params->mib_size_log2);
-          }
+        if (ms_params->is_intra_mode &&
+            ms_params->cm->features.allow_local_intrabc) {
+          MV sub_mv = { (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
+                            best_mv->row + site[idx].mv.row),
+                        (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
+                            best_mv->col + site[idx].mv.col) };
+          valid = av2_is_dv_valid(sub_mv, ms_params->cm, ms_params->xd,
+                                  ms_params->mi_row, ms_params->mi_col,
+                                  ms_params->bsize, ms_params->mib_size_log2);
         }
-        if (!valid) continue;
-
-        for (j = 0; j < 4; j++) {
-          int row = (site[idx + j].mv.row * prec_multiplier);
-          int col = (site[idx + j].mv.col * prec_multiplier);
-          block_offset[j] = (row * ref_stride + col) + best_address;
+        cand_ok[j] = valid;
+        cand_sad[j] = UINT_MAX;
+        if (valid) {
+          const int row = site[idx].mv.row * prec_multiplier;
+          const int col = site[idx].mv.col * prec_multiplier;
+          cand_off[j] = (row * ref_stride + col) + best_address;
+        } else {
+          cand_off[j] = NULL;
         }
+      }
 
-        int gpu_handled = 0;
+      int gpu_handled = 0;
 #if defined(AVM_GPU_HOOKS)
-        gpu_handled = avm_gpu_hook_sad_multi(
-            src_buf, src_stride, (const uint16_t *const *)block_offset,
-            ref_stride, block_size_wide[ms_params->bsize],
-            block_size_high[ms_params->bsize], 4, sads);
+      gpu_handled = avm_gpu_hook_sad_multi(
+          src_buf, src_stride, (const uint16_t *const *)cand_off, ref_stride,
+          block_size_wide[ms_params->bsize],
+          block_size_high[ms_params->bsize], n_cand, cand_sad);
 #endif
-        if (!gpu_handled) {
-          ms_params->sdx4df(src_buf, src_stride, block_offset, ref_stride,
-                            sads);
+      if (!gpu_handled) {
+        for (j = 0; j < n_cand; j++) {
+          if (!cand_ok[j]) continue;
+          cand_sad[j] =
+              ms_params->sdf(src_buf, src_stride, cand_off[j], ref_stride);
         }
-        for (j = 0; j < 4; j++) {
-          if (sads[j] < bestsad) {
-            const FULLPEL_MV this_mv = {
-              best_mv->row + (site[idx + j].mv.row * prec_multiplier),
-              best_mv->col + (site[idx + j].mv.col * prec_multiplier)
-            };
+      }
 
-            unsigned int thissad =
-                sads[j] + mvsad_err_cost(this_mv, mv_cost_params);
-            if (thissad < bestsad) {
-              bestsad = thissad;
-              best_site = idx + j;
-            }
+      for (j = 0; j < n_cand; j++) {
+        if (!cand_ok[j]) continue;
+        const int idx = j + 1;
+        if (cand_sad[j] < bestsad) {
+          const FULLPEL_MV this_mv = {
+            best_mv->row + (site[idx].mv.row * prec_multiplier),
+            best_mv->col + (site[idx].mv.col * prec_multiplier)
+          };
+          unsigned int thissad =
+              cand_sad[j] + mvsad_err_cost(this_mv, mv_cost_params);
+          if (thissad < bestsad) {
+            bestsad = thissad;
+            best_site = idx;
           }
         }
       }
