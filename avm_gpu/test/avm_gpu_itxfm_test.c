@@ -62,6 +62,19 @@ static const int *matrix_for(int n) {
   }
 }
 
+/* inv_txfm_idtx_sizeN_c is a scaled identity: dst = (src * scale + off) >> shift
+ * with scale 128, 181, 256, 362 for sizes 4, 8, 16, 32. */
+static int g_idtx[2][32 * 32];
+
+/* slot 0 = row matrix, slot 1 = column matrix: both are live at once. */
+static const int *idtx_for(int n, int slot) {
+  static const int kScale[4] = { 128, 181, 256, 362 };
+  int idx = n == 4 ? 0 : (n == 8 ? 1 : (n == 16 ? 2 : 3));
+  memset(g_idtx[slot], 0, sizeof(g_idtx[slot]));
+  for (int i = 0; i < n; i++) g_idtx[slot][i * n + i] = kScale[idx];
+  return g_idtx[slot];
+}
+
 /* The "ADST" side of the AV2 primary tx types is inv_txfm_adst_sizeN_c,
  * which is only defined up to 16 (g_ver_tx_type[ADST_DCT] == ADST). */
 static const int *adst_for(int n) {
@@ -159,7 +172,12 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
          ttype == DCT_DCT   ? "DCT_DCT"
          : ttype == ADST_DCT ? "ADST_DCT"
          : ttype == DCT_ADST ? "DCT_ADST"
-                             : "ADST_ADST",
+         : ttype == ADST_ADST ? "ADST_ADST"
+         : ttype == IDTX      ? "IDTX"
+         : ttype == V_DCT     ? "V_DCT"
+         : ttype == H_DCT     ? "H_DCT"
+         : ttype == V_ADST    ? "V_ADST"
+                              : "H_ADST",
          blocks, cpu_ms, gpu_ms, diff ? "MISMATCH" : "ok");
 
   free(ref);
@@ -226,12 +244,31 @@ int main(void) {
     { 4, 16, TX_4X16, DCT_ADST, 1, 0 }, { 4, 4, TX_4X4, ADST_ADST, 1, 1 },
     { 8, 8, TX_8X8, ADST_ADST, 1, 1 },  { 16, 16, TX_16X16, ADST_ADST, 1, 1 },
     { 4, 8, TX_4X8, ADST_ADST, 1, 1 },  { 8, 16, TX_8X16, ADST_ADST, 1, 1 },
+    /* identity combinations: 2 = IDTX per pass */
+    { 4, 4, TX_4X4, IDTX, 2, 2 },       { 8, 8, TX_8X8, IDTX, 2, 2 },
+    { 16, 16, TX_16X16, IDTX, 2, 2 },   { 4, 8, TX_4X8, IDTX, 2, 2 },
+    { 8, 16, TX_8X16, IDTX, 2, 2 },     { 4, 16, TX_4X16, IDTX, 2, 2 },
+    { 4, 4, TX_4X4, V_DCT, 2, 0 },      { 8, 8, TX_8X8, V_DCT, 2, 0 },
+    { 16, 16, TX_16X16, V_DCT, 2, 0 },  { 4, 8, TX_4X8, V_DCT, 2, 0 },
+    { 4, 4, TX_4X4, H_DCT, 0, 2 },      { 8, 8, TX_8X8, H_DCT, 0, 2 },
+    { 16, 16, TX_16X16, H_DCT, 0, 2 },  { 8, 16, TX_8X16, H_DCT, 0, 2 },
+    { 4, 4, TX_4X4, V_ADST, 2, 1 },     { 8, 8, TX_8X8, V_ADST, 2, 1 },
+    { 16, 16, TX_16X16, V_ADST, 2, 1 }, { 4, 4, TX_4X4, H_ADST, 1, 2 },
+    { 8, 8, TX_8X8, H_ADST, 1, 2 },     { 16, 16, TX_16X16, H_ADST, 1, 2 },
   };
   for (size_t i = 0; i < sizeof(kAdst) / sizeof(kAdst[0]); i++) {
-    const int *mrow = kAdst[i].row_fdst ? adst_for(kAdst[i].w)
-                                        : matrix_for(kAdst[i].w);
-    const int *mcol = kAdst[i].col_fdst ? adst_for(kAdst[i].h)
-                                        : matrix_for(kAdst[i].h);
+    const int *mrow = kAdst[i].row_fdst == 1 ? adst_for(kAdst[i].w)
+                      : kAdst[i].row_fdst == 2 ? NULL /* idtx below */
+                                               : matrix_for(kAdst[i].w);
+    const int *mcol = kAdst[i].col_fdst == 1 ? adst_for(kAdst[i].h)
+                      : kAdst[i].col_fdst == 2 ? NULL
+                                               : matrix_for(kAdst[i].h);
+    const int *mrow_i =
+        kAdst[i].row_fdst == 2 ? idtx_for(kAdst[i].w, 0) : mrow;
+    const int *mcol_i =
+        kAdst[i].col_fdst == 2 ? idtx_for(kAdst[i].h, 1) : mcol;
+    mrow = mrow_i;
+    mcol = mcol_i;
     if (check_block(ctx, it, kAdst[i].w, kAdst[i].h, kAdst[i].tx,
                     kAdst[i].ttype, mrow, mcol, &failures) != 0) {
       return 1;
