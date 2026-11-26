@@ -201,8 +201,8 @@ documentation. This section is the short version.
 
 | Check | Contract | Gate |
 |---|---|---|
-| high-bitdepth SAD (`sad.comp`) | matches `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64 | `avm_gpu_sad_test` |
-| variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths, both upload layouts | `avm_gpu_var_test`, `avm_gpu_var_test_packed` |
+| high-bitdepth SAD (`sad.comp`) | matches `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64, host-visible and device-local arena placement | `avm_gpu_sad_test`, `avm_gpu_sad_test_arena` |
+| variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths, both upload layouts and both buffer placements | `avm_gpu_var_test`, `avm_gpu_var_test_packed`, `avm_gpu_var_test_arena` |
 | forward DCT 4x4 / 8x8 (`txfm.comp`) | matches `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c` bit-for-bit, both upload layouts | `avm_gpu_txfm_test`, `avm_gpu_txfm_test_packed` |
 | intra DC/V/H/DC_LEFT/DC_TOP/DC_128/SMOOTH/SMOOTH_V/SMOOTH_H/PAETH (`intra.comp`) | matches `avm_highbd_*_predictor_*_c`, 10 modes × 4x4…64x64, plus availability rule and clamped edges | `avm_gpu_intra_test` |
 | directional intra zones 1-3 (`intra_dir.comp`) | matches `av2_highbd_dr_prediction_z{1,2,3}_c`, 6 angle configs × 5 sizes × mrl 0-2 | `avm_gpu_intra_test` |
@@ -266,9 +266,11 @@ not change any kernel result.
   `sse - sum²/(w·h)` formula run on the host in 64-bit C, copied verbatim from
   `avm_dsp/variance.c`.
 - **M0 data model.** Each 16-bit sample occupies one 32-bit word, which avoids
-  `VK_KHR_16bit_storage`; M1 replaces this with `ushort` storage behind the same
-  signatures. Buffers are host-visible and coherent; the arena/device-local
-  staging step is not implemented yet.
+  `VK_KHR_16bit_storage`; with `AVM_GPU_PACK16=1` SAD, variance and the forward
+  DCT instead pack two samples per word. Buffers are host-visible and coherent
+  by default; `AV2_GPU_ARENA=1` puts SAD and variance in a device-local arena
+  with staging copies, while the other modules still use the host-visible
+  path.
 
 ### Not claimed
 

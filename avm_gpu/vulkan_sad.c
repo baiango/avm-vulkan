@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_SAD_SPV_PATH
@@ -30,20 +31,35 @@ struct avm_gpu_sad {
   size_t widen_cap;
   int src_stride, ref_stride;
   int packed; /* M1: two samples per word, no expansion on upload */
+  avm_gpu_arena *arena; /* device-local arena (AV2_GPU_ARENA=1) */
 };
+
+/* Arena size in MiB, overridable with AV2_GPU_ARENA_MB. */
+static VkDeviceSize arena_bytes_from_env(void) {
+  const char *mb = getenv("AV2_GPU_ARENA_MB");
+  const long v = mb && *mb ? strtol(mb, NULL, 10) : 64;
+  return (VkDeviceSize)(v > 0 ? v : 64) << 20;
+}
+
+static avm_gpu_arena *maybe_create_arena(avm_gpu_ctx *ctx) {
+  const char *env = getenv("AV2_GPU_ARENA");
+  if (!env || !*env || !strcmp(env, "0")) return NULL;
+  char err[AVM_GPU_ERR_LEN];
+  avm_gpu_arena *arena = NULL;
+  if (avm_gpu_arena_create(ctx, arena_bytes_from_env(), &arena, err) != 0) {
+    fprintf(stderr, "avm_gpu: device-local arena disabled (%s)\n", err);
+    return NULL;
+  }
+  if (getenv("AV2_GPU_ARENA_VERBOSE")) {
+    fprintf(stderr, "avm_gpu: SAD arena %llu MiB\n",
+            (unsigned long long)(arena_bytes_from_env() >> 20));
+  }
+  return arena;
+}
 
 typedef struct push_constants {
   uint32_t bw, bh, src_stride, ref_stride, count, packed;
 } push_constants;
-
-static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
-                      VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
-  if (*cap >= need) return 0;
-  avm_gpu_buf_destroy(ctx, buf);
-  if (avm_gpu_buf_create(ctx, need, buf, err) != 0) return -1;
-  *cap = buf->size;
-  return 0;
-}
 
 int avm_gpu_sad_create(avm_gpu_ctx *ctx, avm_gpu_sad **out,
                        char err[AVM_GPU_ERR_LEN]) {
@@ -58,6 +74,7 @@ int avm_gpu_sad_create(avm_gpu_ctx *ctx, avm_gpu_sad **out,
     free(sad);
     return -1;
   }
+  sad->arena = maybe_create_arena(ctx);
   *out = sad;
   return 0;
 }
@@ -69,6 +86,7 @@ void avm_gpu_sad_destroy(avm_gpu_ctx *ctx, avm_gpu_sad *sad) {
   avm_gpu_buf_destroy(ctx, &sad->ref);
   avm_gpu_buf_destroy(ctx, &sad->pos);
   avm_gpu_buf_destroy(ctx, &sad->cost);
+  avm_gpu_arena_destroy(ctx, sad->arena);
   free(sad->widen);
   free(sad);
 }
@@ -112,21 +130,26 @@ int avm_gpu_sad_set_planes(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
       sad->packed ? (VkDeviceSize)(src_n * 2) : (VkDeviceSize)(src_n * 4);
   const VkDeviceSize ref_bytes =
       sad->packed ? (VkDeviceSize)(ref_n * 2) : (VkDeviceSize)(ref_n * 4);
-  if (ensure_buf(ctx, &sad->src, &sad->src_cap, src_bytes, err) ||
-      ensure_buf(ctx, &sad->ref, &sad->ref_cap, ref_bytes, err)) {
+  if (avm_gpu_slot_reserve(ctx, sad->arena, &sad->src, &sad->src_cap, src_bytes,
+                           err) ||
+      avm_gpu_slot_reserve(ctx, sad->arena, &sad->ref, &sad->ref_cap, ref_bytes,
+                           err)) {
     return -1;
   }
-  if (sad->packed) {
-    /* Two adjacent 16-bit samples already are one little-endian word. */
-    memcpy(sad->src.mapped, src, (size_t)src_bytes);
-    memcpy(sad->ref.mapped, ref, (size_t)ref_bytes);
-  } else {
+  const void *src_up = src;
+  const void *ref_up = ref;
+  if (!sad->packed) {
     if (widen_into(sad, src, src_n, ref, ref_n) != 0) {
       snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
       return -1;
     }
-    memcpy(sad->src.mapped, sad->widen, (size_t)src_bytes);
-    memcpy(sad->ref.mapped, sad->widen + src_n, (size_t)ref_bytes);
+    src_up = sad->widen;
+    ref_up = sad->widen + src_n;
+  }
+  /* Packed: two adjacent 16-bit samples already are one little-endian word. */
+  if (avm_gpu_slot_upload(ctx, sad->arena, &sad->src, src_up, src_bytes, err) ||
+      avm_gpu_slot_upload(ctx, sad->arena, &sad->ref, ref_up, ref_bytes, err)) {
+    return -1;
   }
   sad->src_stride = src_stride;
   sad->ref_stride = ref_stride;
@@ -143,19 +166,26 @@ int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
   }
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
   const VkDeviceSize cost_bytes = (VkDeviceSize)n * sizeof(*cost);
-  if (ensure_buf(ctx, &sad->pos, &sad->pos_cap, pos_bytes, err) ||
-      ensure_buf(ctx, &sad->cost, &sad->cost_cap, cost_bytes, err)) {
+  if (avm_gpu_slot_reserve(ctx, sad->arena, &sad->pos, &sad->pos_cap,
+                           pos_bytes, err) ||
+      avm_gpu_slot_reserve(ctx, sad->arena, &sad->cost, &sad->cost_cap,
+                           cost_bytes, err)) {
     return -1;
   }
-  memcpy(sad->pos.mapped, blocks, (size_t)pos_bytes);
+  if (avm_gpu_slot_upload(ctx, sad->arena, &sad->pos, blocks, pos_bytes, err)) {
+    return -1;
+  }
 
   /* One workgroup per candidate: the whole batch rides one dispatch. */
   const avm_gpu_buf bufs[4] = { sad->src, sad->ref, sad->pos, sad->cost };
   push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
                         (uint32_t)sad->src_stride, (uint32_t)sad->ref_stride,
                         (uint32_t)n,    (uint32_t)sad->packed };
-  const int rc = avm_gpu_pipeline_dispatch(ctx, sad->pipe, bufs, 4, &pc,
+  int rc = avm_gpu_pipeline_dispatch(ctx, sad->pipe, bufs, 4, &pc,
                                            sizeof(pc), (uint32_t)n, err);
-  if (rc == 0) memcpy(cost, sad->cost.mapped, (size_t)cost_bytes);
+  if (rc == 0) {
+    rc = avm_gpu_slot_download(ctx, sad->arena, &sad->cost, cost, cost_bytes,
+                               err);
+  }
   return rc;
 }

@@ -164,6 +164,7 @@ add_library(
   avm_gpu STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_gpu.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/pipeline.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/arena.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_sad.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_var.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_txfm.c"
@@ -231,6 +232,10 @@ if(ENABLE_TESTS)
   set_tests_properties(
     avm_gpu_var_test_packed
     PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AVM_GPU_PACK16=1")
+  add_test(NAME avm_gpu_var_test_arena COMMAND avm_gpu_var_test)
+  set_tests_properties(
+    avm_gpu_var_test_arena
+    PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AV2_GPU_ARENA=1;AVM_GPU_PACK16=1")
 
   add_executable(avm_gpu_txfm_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_txfm_test.c")

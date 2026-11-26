@@ -37,6 +37,8 @@ typedef struct avm_gpu_buf {
   VkDeviceMemory memory;
   void *mapped;
   VkDeviceSize size;
+  /* Suballocation inside a shared buffer (arena); 0/0 = whole buffer. */
+  VkDeviceSize offset;
 } avm_gpu_buf;
 
 /* Returns 0 on success and -1 on failure, with err filled in. */

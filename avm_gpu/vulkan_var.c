@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_VAR_SPV_PATH
@@ -28,7 +29,26 @@ struct avm_gpu_var {
   VkDeviceSize src_cap, ref_cap, pos_cap, res_cap;
   int src_stride, ref_stride;
   int packed;
+  avm_gpu_arena *arena; /* device-local arena (AV2_GPU_ARENA=1) */
 };
+
+static VkDeviceSize arena_bytes_from_env(void) {
+  const char *mb = getenv("AV2_GPU_ARENA_MB");
+  const long v = mb && *mb ? strtol(mb, NULL, 10) : 64;
+  return (VkDeviceSize)(v > 0 ? v : 64) << 20;
+}
+
+static avm_gpu_arena *maybe_create_arena(avm_gpu_ctx *ctx) {
+  const char *env = getenv("AV2_GPU_ARENA");
+  if (!env || !*env || !strcmp(env, "0")) return NULL;
+  char err[AVM_GPU_ERR_LEN];
+  avm_gpu_arena *arena = NULL;
+  if (avm_gpu_arena_create(ctx, arena_bytes_from_env(), &arena, err) != 0) {
+    fprintf(stderr, "avm_gpu: device-local arena disabled (%s)\n", err);
+    return NULL;
+  }
+  return arena;
+}
 
 typedef struct push_constants {
   uint32_t bw, bh, src_stride, ref_stride, count, packed;
@@ -38,15 +58,6 @@ typedef struct push_constants {
 typedef struct block_result {
   uint32_t sse_hi, sse_lo, sum, pad;
 } block_result;
-
-static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
-                      VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
-  if (*cap >= need) return 0;
-  avm_gpu_buf_destroy(ctx, buf);
-  if (avm_gpu_buf_create(ctx, need, buf, err) != 0) return -1;
-  *cap = buf->size;
-  return 0;
-}
 
 int avm_gpu_var_create(avm_gpu_ctx *ctx, avm_gpu_var **out,
                        char err[AVM_GPU_ERR_LEN]) {
@@ -61,6 +72,7 @@ int avm_gpu_var_create(avm_gpu_ctx *ctx, avm_gpu_var **out,
     free(v);
     return -1;
   }
+  v->arena = maybe_create_arena(ctx);
   *out = v;
   return 0;
 }
@@ -72,6 +84,7 @@ void avm_gpu_var_destroy(avm_gpu_ctx *ctx, avm_gpu_var *v) {
   avm_gpu_buf_destroy(ctx, &v->ref);
   avm_gpu_buf_destroy(ctx, &v->pos);
   avm_gpu_buf_destroy(ctx, &v->res);
+  avm_gpu_arena_destroy(ctx, v->arena);
   free(v);
 }
 
@@ -102,13 +115,17 @@ int avm_gpu_var_set_planes(avm_gpu_ctx *ctx, avm_gpu_var *v,
       v->packed ? (VkDeviceSize)(ref_n * 2) : (VkDeviceSize)(ref_n * 4);
 
   if (v->packed) {
-    if (ensure_buf(ctx, &v->src, &v->src_cap, src_bytes, err) ||
-        ensure_buf(ctx, &v->ref, &v->ref_cap, ref_bytes, err)) {
+    if (avm_gpu_slot_reserve(ctx, v->arena, &v->src, &v->src_cap, src_bytes,
+                             err) ||
+        avm_gpu_slot_reserve(ctx, v->arena, &v->ref, &v->ref_cap, ref_bytes,
+                             err)) {
       return -1;
     }
     /* Two adjacent 16-bit samples already are one little-endian word. */
-    memcpy(v->src.mapped, src, (size_t)src_bytes);
-    memcpy(v->ref.mapped, ref, (size_t)ref_bytes);
+    if (avm_gpu_slot_upload(ctx, v->arena, &v->src, src, src_bytes, err) ||
+        avm_gpu_slot_upload(ctx, v->arena, &v->ref, ref, ref_bytes, err)) {
+      return -1;
+    }
     v->src_stride = src_stride;
     v->ref_stride = ref_stride;
     return 0;
@@ -122,16 +139,19 @@ int avm_gpu_var_set_planes(avm_gpu_ctx *ctx, avm_gpu_var *v,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  if (ensure_buf(ctx, &v->src, &v->src_cap, src_bytes, err) ||
-      ensure_buf(ctx, &v->ref, &v->ref_cap, ref_bytes, err)) {
+  if (avm_gpu_slot_reserve(ctx, v->arena, &v->src, &v->src_cap, src_bytes,
+                           err) ||
+      avm_gpu_slot_reserve(ctx, v->arena, &v->ref, &v->ref_cap, ref_bytes,
+                           err)) {
     free(sw);
     free(rw);
     return -1;
   }
-  memcpy(v->src.mapped, sw, (size_t)src_bytes);
-  memcpy(v->ref.mapped, rw, (size_t)ref_bytes);
+  const int up = avm_gpu_slot_upload(ctx, v->arena, &v->src, sw, src_bytes, err) ||
+                 avm_gpu_slot_upload(ctx, v->arena, &v->ref, rw, ref_bytes, err);
   free(sw);
   free(rw);
+  if (up) return -1;
   v->src_stride = src_stride;
   v->ref_stride = ref_stride;
   return 0;
@@ -161,11 +181,15 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
   }
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
   const VkDeviceSize res_bytes = (VkDeviceSize)n * sizeof(block_result);
-  if (ensure_buf(ctx, &v->pos, &v->pos_cap, pos_bytes, err) ||
-      ensure_buf(ctx, &v->res, &v->res_cap, res_bytes, err)) {
+  if (avm_gpu_slot_reserve(ctx, v->arena, &v->pos, &v->pos_cap, pos_bytes,
+                           err) ||
+      avm_gpu_slot_reserve(ctx, v->arena, &v->res, &v->res_cap, res_bytes,
+                           err)) {
     return -1;
   }
-  memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
+  if (avm_gpu_slot_upload(ctx, v->arena, &v->pos, blocks, pos_bytes, err)) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
   push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
@@ -175,7 +199,15 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc != 0) return rc;
 
-  const block_result *res = (const block_result *)v->res.mapped;
+  block_result *res = malloc((size_t)res_bytes);
+  if (!res) {
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return -1;
+  }
+  if (avm_gpu_slot_download(ctx, v->arena, &v->res, res, res_bytes, err)) {
+    free(res);
+    return -1;
+  }
   const int sse_shift = bitdepth == 8 ? 0 : (bitdepth == 10 ? 4 : 8);
   const int sum_shift = sse_shift / 2;
   for (int i = 0; i < n; i++) {
@@ -189,6 +221,7 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
     if (sse_out) sse_out[i] = sse32;
     variance_out[i] = sse32 - (uint32_t)(((int64_t)sum * sum) / (bw * bh));
   }
+  free(res);
   return 0;
 }
 
@@ -203,11 +236,15 @@ int avm_gpu_var_run_raw(avm_gpu_ctx *ctx, avm_gpu_var *v,
   }
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
   const VkDeviceSize res_bytes = (VkDeviceSize)n * sizeof(block_result);
-  if (ensure_buf(ctx, &v->pos, &v->pos_cap, pos_bytes, err) ||
-      ensure_buf(ctx, &v->res, &v->res_cap, res_bytes, err)) {
+  if (avm_gpu_slot_reserve(ctx, v->arena, &v->pos, &v->pos_cap, pos_bytes,
+                           err) ||
+      avm_gpu_slot_reserve(ctx, v->arena, &v->res, &v->res_cap, res_bytes,
+                           err)) {
     return -1;
   }
-  memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
+  if (avm_gpu_slot_upload(ctx, v->arena, &v->pos, blocks, pos_bytes, err)) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
   push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
@@ -217,12 +254,21 @@ int avm_gpu_var_run_raw(avm_gpu_ctx *ctx, avm_gpu_var *v,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc != 0) return rc;
 
-  const block_result *res = (const block_result *)v->res.mapped;
+  block_result *res = malloc((size_t)res_bytes);
+  if (!res) {
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return -1;
+  }
+  if (avm_gpu_slot_download(ctx, v->arena, &v->res, res, res_bytes, err)) {
+    free(res);
+    return -1;
+  }
   for (int i = 0; i < n; i++) {
     if (sse_out) {
       sse_out[i] = ((uint64_t)res[i].sse_hi << 32) | res[i].sse_lo;
     }
     if (sum_out) sum_out[i] = (int32_t)res[i].sum;
   }
+  free(res);
   return 0;
 }

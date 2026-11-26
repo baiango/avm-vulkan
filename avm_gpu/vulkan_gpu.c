@@ -251,6 +251,11 @@ int avm_gpu_buf_create(avm_gpu_ctx *ctx, VkDeviceSize size, avm_gpu_buf *buf,
 
 void avm_gpu_buf_destroy(avm_gpu_ctx *ctx, avm_gpu_buf *buf) {
   if (!buf) return;
+  /* Suballocations of a shared arena own nothing: memory == NULL. */
+  if (buf->buffer && !buf->memory) {
+    memset(buf, 0, sizeof(*buf));
+    return;
+  }
   if (buf->mapped && buf->memory) {
     vkUnmapMemory(ctx->device, buf->memory);
     buf->mapped = NULL;

@@ -94,6 +94,7 @@ and throughput is not claimed — this milestone is about correctness.
 |---|---|
 | `vulkan_gpu.{h,c}` | instance/device/queue/command pool/fence, host-visible buffers, sync submit |
 | `pipeline.{h,c}` | shared SPIR-V/descriptor/push-constant/pipeline setup and dispatch for every kernel |
+| `arena.{h,c}` | device-local arena: one large `DEVICE_LOCAL` buffer with a 64-byte-aligned first-fit suballocator, a staging buffer and copy commands; plus the `avm_gpu_slot_*` helpers the modules use |
 | `vulkan_sad.{h,c}` | resident planes + batched SAD dispatch, pipeline and descriptor caching |
 | `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
 | `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
@@ -142,10 +143,23 @@ and throughput is not claimed — this milestone is about correctness.
   gate the packed path in ctest, and the encoder parity gate passes with
   `AVM_GPU_PACK16=1` exported. Packed mode requires even strides; odd strides
   fall back to the M0 layout.
-- Buffers are host-visible and coherent: planes are uploaded by `memcpy` and
-  results read back after the fence. M1 stages through device-local memory with
-  a copy queue and a persistent arena (the same shape as the VRAM arena in the
-  encoder tree).
+- **Two placements.** By default buffers are host-visible and coherent: planes
+  are uploaded by `memcpy` and results read back after the fence. With
+  `AV2_GPU_ARENA=1` the SAD and variance modules instead suballocate their
+  buffers from a single device-local `VkBuffer` (`arena.{h,c}`), upload through
+  a reusable host-visible staging buffer with `vkCmdCopyBuffer`, and read back
+  the same way. The descriptor offset of a suballocation travels in
+  `avm_gpu_buf.offset`, and a suballocation is recognisable by
+  `buffer != NULL, memory == NULL`, so `avm_gpu_buf_destroy()` never frees
+  memory it does not own. If the arena cannot satisfy a request (or is full)
+  the slot silently falls back to a host-visible buffer, and
+  `AV2_GPU_ARENA_VERBOSE=1` reports it.
+  `AV2_GPU_ARENA_MB` sets the arena size (default 64 MiB).
+  On Apple silicon the arena is *slower* than plain host-visible buffers
+  (unified memory, so the staging copy is pure overhead): the three-encode
+  parity gate takes 126 s with the default placement and 543 s with
+  `AV2_GPU_ARENA=1`, with identical md5s. It is the right placement for a
+  discrete GPU (VRAM), which is what it exists for; it is off by default.
 - **No 64-bit shader integers.** SSE reaches 2^33 at 12 bit for a 64x64 block,
   so `variance.comp` accumulates it as an (hi, lo) u32 pair and reduces with
   explicit carry. That keeps the kernel portable to backends without
@@ -181,6 +195,15 @@ The variance seam covers all 4x4..256x256 variance sizes, because they all
 funnel through `highbd_variance64()`; `AV2_GPU_VAR_STATS=1` prints the block
 count.
 
+Buffer placement used by both seams:
+
+| env | effect |
+|---|---|
+| unset | host-visible, coherent per-call buffers |
+| `AV2_GPU_ARENA=1` | device-local arena + staging copies (`AV2_GPU_ARENA_MB`, default 64) |
+| `AV2_GPU_ARENA_VERBOSE=1` | report arena size and any slot fallback |
+| `AVM_GPU_PACK16=1` | packed 16-bit upload layout (SAD, variance, forward DCT) |
+
 ### End-to-end gate
 
 `ctest -R avm_gpu_encoder_parity` (or `test/run_encoder_parity.sh /path/to/avmenc`)
@@ -198,6 +221,7 @@ Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 | `AV2_GPU_SAD=1` (4-candidate groups) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
 | same + `AVM_GPU_PACK16=1` | 712,996 | 178,249 | 35.7 s | md5 `cd833e6f...` |
 | whole-step batching + packed storage | 714,775 | 80,895 | 17.7 s | md5 `cd833e6f...` |
+| same, plus `AV2_GPU_ARENA=1` (device-local) | 714,775 | 80,895 | 543 s (3 encodes) | md5 `cd833e6f...` |
 
 Batching, the reusable expansion scratch and packed storage took the GPU encode
 from 440.5 s to 35.7 s (12.3x) with the same bitstream. It is still ~19x slower
@@ -211,8 +235,10 @@ the block is re-packed per call. The remaining fixes are structural, not micro:
    the bitstream is unchanged.
 2. Keep the **source and reference frames resident** for the duration of a
    block's search instead of re-packing planes per call.
-3. Add the device-local arena so planes are staged once per frame instead of
-   per call (packed storage already halves the traffic).
+3. ~~Add a device-local arena.~~ Done (`AV2_GPU_ARENA=1`, gated by
+   `avm_gpu_sad_test_arena` / `avm_gpu_var_test_arena`): it is correct but a
+   loss on unified memory; the next win is to keep the planes resident across
+   calls (item 2) rather than to move them to VRAM.
 
 ## Build and run
 
@@ -268,14 +294,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] CCSO block pass + parity gate (1008 cases)
 - [x] encoder call sites (batched SAD and variance) with a byte-identical
       bitstream gate
+- [x] device-local arena + staging copies, opt-in, gated for SAD and variance
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
-- Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
-  only); variance and transform still widen to 32-bit words. Buffers are
-  host-visible and re-uploaded per call; the device-local arena is still to do.
+- Data model: packed 16-bit storage covers SAD, variance and the forward DCT;
+  the inverse transform, intra, inter, warp and the filters still widen to
+  32-bit words. A device-local arena exists for SAD and variance, but the
+  remaining modules use host-visible buffers and re-upload per call.
 - Kernel families still missing: the 64-wide transform sizes and loop
   restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,

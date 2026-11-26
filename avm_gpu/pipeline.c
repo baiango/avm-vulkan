@@ -226,8 +226,8 @@ int avm_gpu_pipeline_dispatch_2d(avm_gpu_ctx *ctx, avm_gpu_pipeline *p,
   }
   for (int i = 0; i < n_bindings; i++) {
     info[i].buffer = bufs[i].buffer;
-    info[i].offset = 0;
-    info[i].range = VK_WHOLE_SIZE;
+    info[i].offset = bufs[i].offset;
+    info[i].range = bufs[i].size ? bufs[i].size : VK_WHOLE_SIZE;
     wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     wr[i].dstSet = p->ds;
     wr[i].dstBinding = (uint32_t)i;
