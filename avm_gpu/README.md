@@ -16,8 +16,9 @@ and throughput is not claimed — this milestone is about correctness.
   `avm_highbd_{8,10,12}_varianceWxH_c` for 8/10/12-bit data (gate:
   `test/avm_gpu_var_test.c`, 3 bitdepths x 9 block sizes x 128 candidates).
 - **The encoder runs on it.** With `AV2_GPU_SAD=1`, `avmenc` prices SAD blocks
-  through `avm_gpu_hook_sad()` and produces a bitstream identical to the CPU
-  run (gate: `test/run_encoder_parity.sh`, 1.2M blocks, md5 compared).
+  through the batched hook in motion search (one dispatch per 4-candidate
+  group) and produces a bitstream identical to the CPU run (gate:
+  `test/run_encoder_parity.sh`, 713k blocks, md5 compared).
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -61,18 +62,18 @@ and throughput is not claimed — this milestone is about correctness.
 
 ## Encoder integration
 
-`avm_dsp/sad.c::highbd_sad()` calls `avm_gpu_hook_sad()` when the library is
-built with `AVM_GPU_SAD_HOOK` (the `AV2_ENABLE_VULKAN` build defines it on
-`avm_dsp_common`). The hook:
+Two seams, selected by `AV2_GPU_SAD`:
 
-- is **inert unless `AV2_GPU_SAD=1`**, so default builds and runs are unchanged;
-- falls through to the CPU loop if no device initialises, so a machine without
-  Vulkan still encodes;
-- packs each block into a contiguous staging plane and calls
-  `avm_gpu_sad_run()` for one candidate, under a mutex (encoder threads may
-  call SAD concurrently);
-- prints `avm_gpu: N SAD blocks priced on the GPU` at exit when
-  `AV2_GPU_SAD_STATS=1`.
+| value | path | shape |
+|---|---|---|
+| unset / `0` | CPU only | the hook is never initialised |
+| `1` / `batch` | batched | `av2/encoder/mcomp.c` prices each 4-candidate group of the diamond search in one dispatch |
+| `single` | per-call | `avm_dsp/sad.c::highbd_sad()` dispatches one block per call (debugging) |
+| `all` | both | per-call fallback plus batched groups |
+
+Both entries fall through to the exact CPU SAD when no device initialises, so a
+machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
+dispatches at exit.
 
 ```sh
 AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./avmenc --limit=3 --good --cpu-used=8 \
@@ -83,22 +84,29 @@ AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./avmenc --limit=3 --good --cpu-used=8 \
 
 `ctest -R avm_gpu_encoder_parity` (or `test/run_encoder_parity.sh /path/to/avmenc`)
 encodes the same clip twice and requires identical md5s. It fails if the hook
-never initialises or prices zero blocks, so a silent CPU fallback cannot pass.
+never initialises, prices zero blocks, or if blocks/dispatch <= 1 (i.e. the
+batched path did not actually run), so neither a silent CPU fallback nor a
+regression to per-call dispatching can pass.
 
 Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 
-| run | wall time | bitstream |
-|---|---:|---|
-| CPU SAD | 1.86 s | 1020 B, md5 `cd833e6f7d078f45480bf1166fecb673` |
-| Vulkan SAD (`AV2_GPU_SAD=1`, 1,211,438 blocks) | 440.5 s | 1020 B, md5 `cd833e6f7d078f45480bf1166fecb673` |
+| run | blocks | dispatches | wall time | bitstream |
+|---|---:|---:|---:|---|
+| CPU SAD | - | - | 1.86 s | 1020 B, md5 `cd833e6f...` |
+| `AV2_GPU_SAD=single` (one dispatch per SAD call) | 1,211,438 | 1,211,438 | 440.5 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1` (batched, 4 candidates per dispatch) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
 
-That 236x slowdown is the honest result: this hook issues **one dispatch plus
-one fence wait per SAD call**, which is the worst possible shape for a GPU.
-It exists to prove the encoder can consume the Vulkan kernels bit-exactly, not
-to make encoding faster on this machine. The throughput case needs the batched
-API (`avm_gpu_sad_run()` with N candidates) wired into a search loop that
-already has N candidates in hand, plus resident frames instead of per-call
-staging.
+Batching plus the reusable u16->u32 scratch took the GPU encode from 440.5 s to
+73.9 s (6.0x) with the same bitstream. It is still ~40x slower than the CPU on
+this machine: each dispatch costs ~0.4 ms through MoltenVK and the whole frame
+is re-packed per call. The remaining fixes are structural, not micro:
+
+1. Price the **whole search step** (up to 12 candidates) instead of 4-point
+   groups, cutting dispatch count another ~3x.
+2. Keep the **source and reference frames resident** for the duration of a
+   block's search instead of re-packing planes per call.
+3. Only then is the M1 data model (16-bit storage, device-local arena) the next
+   bottleneck.
 
 ## Build and run
 

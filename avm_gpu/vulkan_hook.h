@@ -19,6 +19,9 @@
 extern "C" {
 #endif
 
+/* Largest candidate batch the batched entry point accepts. */
+#define AVM_GPU_HOOK_MAX_BATCH 16
+
 /*
  * Encoder integration seam for the C SAD path.
  *
@@ -30,9 +33,20 @@ extern "C" {
  * default build keeps the CPU path untouched. Set AV2_GPU_SAD_STATS=1 to print
  * the number of blocks that went through the GPU at exit.
  */
+/* AV2_GPU_SAD=1 (or "batch"): batched entry only; "single": per-call entry
+ * only; "all": both; unset/0: the hook is inert. */
 int avm_gpu_hook_sad(const uint16_t *src, int src_stride, const uint16_t *ref,
                      int ref_stride, int width, int height,
                      unsigned int *sad);
+
+/*
+ * Batched form used by motion search: prices n candidates against the same
+ * source block in one dispatch. Entries with a NULL reference pointer are
+ * skipped and their sad[] slot is left untouched. Returns 1 when handled.
+ */
+int avm_gpu_hook_sad_multi(const uint16_t *src, int src_stride,
+                           const uint16_t *const *ref_ptrs, int ref_stride,
+                           int width, int height, int n, unsigned int *sad);
 
 #ifdef __cplusplus
 } /* extern "C" */

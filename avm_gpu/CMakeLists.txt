@@ -66,9 +66,12 @@ add_dependencies(avm_gpu avm_gpu_shaders)
 # Encoder integration seam. avm_dsp/sad.c calls avm_gpu_hook_sad() when it is
 # built with AVM_GPU_SAD_HOOK; the hook is inert unless AV2_GPU_SAD=1, so the
 # default encode path is byte-identical.
-if(TARGET avm_dsp_common)
-  target_compile_definitions(avm_dsp_common PRIVATE AVM_GPU_SAD_HOOK=1)
-endif()
+foreach (avm_gpu_hook_target avm_dsp_common avm_dsp_encoder avm_av2_common
+                             avm_av2_encoder avm_av2_decoder)
+  if(TARGET ${avm_gpu_hook_target})
+    target_compile_definitions(${avm_gpu_hook_target} PRIVATE AVM_GPU_SAD_HOOK=1)
+  endif()
+endforeach()
 if(TARGET avm)
   target_link_libraries(avm PUBLIC avm_gpu)
 endif()

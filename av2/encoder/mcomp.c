@@ -36,6 +36,10 @@
 
 #include "avm_dsp/binary_codes_writer.h"
 
+#if defined(AVM_GPU_SAD_HOOK)
+#include "avm_gpu/vulkan_hook.h"
+#endif
+
 static INLINE void init_ms_buffers(MSBuffers *ms_buffers, const MACROBLOCK *x) {
   ms_buffers->ref = &x->e_mbd.plane[0].pre[0];
   ms_buffers->src = &x->plane[0].src;
@@ -1366,6 +1370,80 @@ static void calc_sad_update_bestmv(
   }
 }
 
+// Prices up to n candidates around temp_best_mv. With the Vulkan hook enabled
+// this is a single dispatch for the whole search step; otherwise it calls the
+// per-candidate SAD function. Candidates outside the MV limits are left as
+// UINT_MAX and skipped by the caller.
+static void calc_sad_batch_prices(const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
+                                  const FULLPEL_MV *temp_best_mv,
+                                  int search_step, int cand_start, int n,
+                                  FULLPEL_MV *mvs, unsigned int *sads) {
+  const struct buf_2d *const src = ms_params->ms_buffers.src;
+  const struct buf_2d *const ref = ms_params->ms_buffers.ref;
+  const search_site *site = ms_params->search_sites->site[search_step];
+  int handled = 0;
+#if defined(AVM_GPU_SAD_HOOK)
+  const uint16_t *ref_ptrs[AVM_GPU_HOOK_MAX_BATCH];
+  int valid = 0;
+#endif
+
+  for (int i = 0; i < n; i++) {
+    mvs[i].row = temp_best_mv->row + site[cand_start + i].mv.row;
+    mvs[i].col = temp_best_mv->col + site[cand_start + i].mv.col;
+    sads[i] = UINT_MAX;
+#if defined(AVM_GPU_SAD_HOOK)
+    ref_ptrs[i] = NULL;
+    if (av2_is_fullmv_in_range(&ms_params->mv_limits, mvs[i],
+                               ms_params->mv_cost_params.pb_mv_precision)) {
+      ref_ptrs[i] = get_buf_from_fullmv(ref, &mvs[i]);
+      valid++;
+    }
+#endif
+  }
+
+#if defined(AVM_GPU_SAD_HOOK)
+  if (valid > 0) {
+    const BLOCK_SIZE bsize = ms_params->bsize;
+    handled = avm_gpu_hook_sad_multi(src->buf, src->stride, ref_ptrs,
+                                     ref->stride, block_size_wide[bsize],
+                                     block_size_high[bsize], n, sads);
+  }
+#endif
+
+  if (handled) return;
+
+  for (int i = 0; i < n; i++) {
+    if (!av2_is_fullmv_in_range(&ms_params->mv_limits, mvs[i],
+                                ms_params->mv_cost_params.pb_mv_precision)) {
+      sads[i] = UINT_MAX;
+      continue;
+    }
+    sads[i] = ms_params->sdf(src->buf, src->stride,
+                             get_buf_from_fullmv(ref, &mvs[i]), ref->stride);
+  }
+}
+
+// Prices the whole candidate set of one search step in one call, then applies
+// the usual best-MV updates in candidate order.
+static void calc_sad_batch_update_bestmv(
+    const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
+    const MV_COST_PARAMS *mv_cost_params, FULLPEL_MV *best_mv,
+    FULLPEL_MV *temp_best_mv, unsigned int *bestsad, unsigned int *raw_bestsad,
+    int search_step, int *best_site, int n, int cand_start) {
+  FULLPEL_MV mvs[AVM_GPU_HOOK_MAX_BATCH];
+  unsigned int sads[AVM_GPU_HOOK_MAX_BATCH];
+  assert(n <= AVM_GPU_HOOK_MAX_BATCH);
+  calc_sad_batch_prices(ms_params, temp_best_mv, search_step, cand_start, n,
+                        mvs, sads);
+  for (int i = 0; i < n; i++) {
+    if (sads[i] == UINT_MAX) continue;
+    const int found_better_mv = update_mvs_and_sad(
+        sads[i], &mvs[i], mv_cost_params, bestsad, raw_bestsad, best_mv,
+        /*second_best_mv=*/NULL);
+    if (found_better_mv) *best_site = cand_start + i;
+  }
+}
+
 // Generic pattern search function that searches over multiple scales.
 // Each scale can have a different number of candidates and shape of
 // candidates as indicated in the num_candidates and candidates arrays
@@ -1424,25 +1502,9 @@ static int pattern_search(FULLPEL_MV start_mv,
       FULLPEL_MV temp_best_mv;
       temp_best_mv.row = br;
       temp_best_mv.col = bc;
-      if (check_bounds(&ms_params->mv_limits, br, bc, 1 << t)) {
-        // Call 4-point sad for multiples of 4 candidates.
-        const int no_of_4_cand_loops = num_candidates[t] >> 2;
-        for (i = 0; i < no_of_4_cand_loops; i++) {
-          calc_sad4_update_bestmv(ms_params, mv_cost_params, best_mv,
-                                  &temp_best_mv, &bestsad, &raw_bestsad, t,
-                                  &best_site, i * 4);
-        }
-        // Rest of the candidates
-        const int remaining_cand = num_candidates[t] % 4;
-        calc_sad_update_bestmv(ms_params, mv_cost_params, best_mv,
-                               &temp_best_mv, &bestsad, &raw_bestsad, t,
-                               &best_site, remaining_cand,
-                               no_of_4_cand_loops * 4);
-      } else {
-        calc_sad_update_bestmv(ms_params, mv_cost_params, best_mv,
-                               &temp_best_mv, &bestsad, &raw_bestsad, t,
-                               &best_site, num_candidates[t], 0);
-      }
+      calc_sad_batch_update_bestmv(ms_params, mv_cost_params, best_mv,
+                                   &temp_best_mv, &bestsad, &raw_bestsad, t,
+                                   &best_site, num_candidates[t], 0);
       if (best_site == -1) {
         continue;
       } else {
@@ -1469,25 +1531,9 @@ static int pattern_search(FULLPEL_MV start_mv,
         FULLPEL_MV temp_best_mv;
         temp_best_mv.row = br;
         temp_best_mv.col = bc;
-        if (check_bounds(&ms_params->mv_limits, br, bc, 1 << s)) {
-          // Call 4-point sad for multiples of 4 candidates.
-          const int no_of_4_cand_loops = num_candidates[s] >> 2;
-          for (i = 0; i < no_of_4_cand_loops; i++) {
-            calc_sad4_update_bestmv(ms_params, mv_cost_params, best_mv,
-                                    &temp_best_mv, &bestsad, &raw_bestsad, s,
-                                    &best_site, i * 4);
-          }
-          // Rest of the candidates
-          const int remaining_cand = num_candidates[s] % 4;
-          calc_sad_update_bestmv(ms_params, mv_cost_params, best_mv,
-                                 &temp_best_mv, &bestsad, &raw_bestsad, s,
-                                 &best_site, remaining_cand,
-                                 no_of_4_cand_loops * 4);
-        } else {
-          calc_sad_update_bestmv(ms_params, mv_cost_params, best_mv,
-                                 &temp_best_mv, &bestsad, &raw_bestsad, s,
-                                 &best_site, num_candidates[s], 0);
-        }
+        calc_sad_batch_update_bestmv(ms_params, mv_cost_params, best_mv,
+                                     &temp_best_mv, &bestsad, &raw_bestsad, s,
+                                     &best_site, num_candidates[s], 0);
 
         if (best_site == -1) {
           continue;
@@ -1847,7 +1893,17 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
           block_offset[j] = (row * ref_stride + col) + best_address;
         }
 
-        ms_params->sdx4df(src_buf, src_stride, block_offset, ref_stride, sads);
+        int gpu_handled = 0;
+#if defined(AVM_GPU_SAD_HOOK)
+        gpu_handled = avm_gpu_hook_sad_multi(
+            src_buf, src_stride, (const uint16_t *const *)block_offset,
+            ref_stride, block_size_wide[ms_params->bsize],
+            block_size_high[ms_params->bsize], 4, sads);
+#endif
+        if (!gpu_handled) {
+          ms_params->sdx4df(src_buf, src_stride, block_offset, ref_stride,
+                            sads);
+        }
         for (j = 0; j < 4; j++) {
           if (sads[j] < bestsad) {
             const FULLPEL_MV this_mv = {

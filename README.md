@@ -203,7 +203,7 @@ documentation. This section is the short version.
 |---|---|---|
 | high-bitdepth SAD (`sad.comp`) | matches `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64 | `avm_gpu_sad_test` |
 | variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths | `avm_gpu_var_test` |
-| encoder integration (`vulkan_hook.c`) | `avmenc` with `AV2_GPU_SAD=1` produces a bitstream with the **same md5** as the CPU run | `avm_gpu_encoder_parity` |
+| encoder integration (`vulkan_hook.c`, batched motion search) | `avmenc` with `AV2_GPU_SAD=1` produces a bitstream with the **same md5** as the CPU run and must price >1 block per dispatch | `avm_gpu_encoder_parity` |
 
 Both gates compare **every block** against the reference on random planes with
 random strides and candidate positions — no tolerance, no PSNR fallback. A
@@ -264,13 +264,19 @@ not change any kernel result.
 ### Not claimed
 
 These are **correctness** results, not speed. On an Apple M4 through MoltenVK
-the integration gate encodes a 3-frame 64×64 clip in 440.5 s with the Vulkan
-SAD hook (1,211,438 blocks) versus 1.86 s on the CPU, with identical
-bitstreams — the hook issues one dispatch and one fence wait per SAD call,
-which is the worst possible shape for a GPU. Entropy coding, CDF state, headers
-and rate control stay on the CPU by design. Turning the port into a speed win
-needs the batched path (`avm_gpu_sad_run()` with many candidates, resident
-frames) wired into a search loop that already holds the candidate list.
+the integration gate encodes a 3-frame 64×64 clip:
+
+| configuration | wall time | bitstream |
+|---|---:|---|
+| CPU SAD | 1.86 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=single`, one dispatch per call | 440.5 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1`, batched, 4 candidates per dispatch (178,249 dispatches) | 73.9 s | md5 `cd833e6f...` |
+
+Batching bought 6.0x, but the GPU path is still ~40x slower than the CPU here:
+each dispatch costs ~0.4 ms through MoltenVK and planes are re-packed per call.
+The remaining work is structural — price whole search steps, keep frames
+resident, then the M1 storage/arena change. Entropy coding, CDF state, headers
+and rate control stay on the CPU by design.
 
 ## Testing
 

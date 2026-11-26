@@ -59,10 +59,20 @@ if ! grep -q "SAD hook enabled" "$work/gpu.log"; then
   exit 1
 fi
 
-calls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) SAD blocks.*/\1/p' "$work/gpu.log")
+stats=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) SAD blocks in \([0-9][0-9]*\) dispatches.*/\1 \2/p' "$work/gpu.log")
+calls=$(echo "$stats" | cut -d' ' -f1)
+dispatches=$(echo "$stats" | cut -d' ' -f2)
 if [ -z "$calls" ] || [ "$calls" -le 0 ]; then
   echo "FAIL: the GPU path priced no blocks (silent CPU fallback)"
   tail -20 "$work/gpu.log"
+  exit 1
+fi
+if [ -z "$dispatches" ] || [ "$dispatches" -le 0 ]; then
+  echo "FAIL: no dispatch statistics in the GPU log"
+  exit 1
+fi
+if [ "$calls" -le "$dispatches" ]; then
+  echo "FAIL: $calls blocks in $dispatches dispatches - the batched path did not run"
   exit 1
 fi
 
@@ -79,7 +89,7 @@ gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
 gpu_size=$(wc -c <"$work/gpu.ivf" | tr -d ' ')
 
-echo "gpu SAD blocks : $calls"
+echo "gpu SAD blocks : $calls in $dispatches dispatches"
 echo "cpu bitstream  : $cpu_size bytes, md5 $cpu_hash"
 echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 

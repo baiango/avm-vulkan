@@ -26,6 +26,8 @@ struct avm_gpu_sad {
   avm_gpu_pipeline *pipe;
   avm_gpu_buf src, ref, pos, cost;
   VkDeviceSize src_cap, ref_cap, pos_cap, cost_cap;
+  uint32_t *widen; /* scratch for the M0 u16 -> u32 expansion */
+  size_t widen_cap;
   int src_stride, ref_stride;
 };
 
@@ -66,43 +68,51 @@ void avm_gpu_sad_destroy(avm_gpu_ctx *ctx, avm_gpu_sad *sad) {
   avm_gpu_buf_destroy(ctx, &sad->ref);
   avm_gpu_buf_destroy(ctx, &sad->pos);
   avm_gpu_buf_destroy(ctx, &sad->cost);
+  free(sad->widen);
   free(sad);
 }
 
-/* M0 uploads one 16-bit sample per 32-bit word; see avm_gpu/README.md. */
-static uint32_t *widen(const uint16_t *plane, int stride, int rows) {
-  if (!plane || stride <= 0 || rows <= 0) return NULL;
-  const size_t n = (size_t)stride * (size_t)rows;
-  uint32_t *w = malloc(n * sizeof(*w));
-  if (!w) return NULL;
-  for (size_t i = 0; i < n; i++) w[i] = plane[i];
-  return w;
+/* M0 uploads one 16-bit sample per 32-bit word; see avm_gpu/README.md.
+ * The expansion buffer is reused across calls: motion search calls this
+ * millions of times per encode. */
+static int widen_into(avm_gpu_sad *sad, const uint16_t *src, size_t src_n,
+                      const uint16_t *ref, size_t ref_n) {
+  if (src_n + ref_n > sad->widen_cap) {
+    free(sad->widen);
+    sad->widen = malloc((src_n + ref_n) * sizeof(*sad->widen));
+    sad->widen_cap = sad->widen ? src_n + ref_n : 0;
+    if (!sad->widen) return -1;
+  }
+  uint32_t *sw = sad->widen;
+  uint32_t *rw = sad->widen + src_n;
+  for (size_t i = 0; i < src_n; i++) sw[i] = src[i];
+  for (size_t i = 0; i < ref_n; i++) rw[i] = ref[i];
+  return 0;
 }
 
 int avm_gpu_sad_set_planes(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
                            const uint16_t *src, int src_stride, int src_rows,
                            const uint16_t *ref, int ref_stride, int ref_rows,
                            char err[AVM_GPU_ERR_LEN]) {
-  uint32_t *sw = widen(src, src_stride, src_rows);
-  uint32_t *rw = widen(ref, ref_stride, ref_rows);
-  if (!sw || !rw) {
-    free(sw);
-    free(rw);
+  if (!src || !ref || src_stride <= 0 || ref_stride <= 0 || src_rows <= 0 ||
+      ref_rows <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid planes");
+    return -1;
+  }
+  const size_t src_n = (size_t)src_stride * (size_t)src_rows;
+  const size_t ref_n = (size_t)ref_stride * (size_t)ref_rows;
+  if (widen_into(sad, src, src_n, ref, ref_n) != 0) {
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  const VkDeviceSize src_bytes = (VkDeviceSize)src_stride * src_rows * 4;
-  const VkDeviceSize ref_bytes = (VkDeviceSize)ref_stride * ref_rows * 4;
+  const VkDeviceSize src_bytes = (VkDeviceSize)src_n * 4;
+  const VkDeviceSize ref_bytes = (VkDeviceSize)ref_n * 4;
   if (ensure_buf(ctx, &sad->src, &sad->src_cap, src_bytes, err) ||
       ensure_buf(ctx, &sad->ref, &sad->ref_cap, ref_bytes, err)) {
-    free(sw);
-    free(rw);
     return -1;
   }
-  memcpy(sad->src.mapped, sw, (size_t)src_bytes);
-  memcpy(sad->ref.mapped, rw, (size_t)ref_bytes);
-  free(sw);
-  free(rw);
+  memcpy(sad->src.mapped, sad->widen, (size_t)src_bytes);
+  memcpy(sad->ref.mapped, sad->widen + src_n, (size_t)ref_bytes);
   sad->src_stride = src_stride;
   sad->ref_stride = ref_stride;
   return 0;
