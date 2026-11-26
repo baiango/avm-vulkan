@@ -227,6 +227,13 @@ if(ENABLE_TESTS)
     avm_gpu_sad_test_arena
     PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AV2_GPU_ARENA=1")
 
+  # The encoder's variance seam: memo + block-area threshold paths.
+  add_executable(avm_gpu_var_hook_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_var_hook_test.c")
+  target_link_libraries(avm_gpu_var_hook_test PRIVATE avm)
+  add_test(NAME avm_gpu_var_hook_test COMMAND avm_gpu_var_hook_test)
+  set_tests_properties(avm_gpu_var_hook_test PROPERTIES SKIP_RETURN_CODE 77)
+
   add_executable(avm_gpu_var_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_var_test.c")
   target_link_libraries(avm_gpu_var_test PRIVATE avm)

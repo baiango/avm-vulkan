@@ -130,6 +130,8 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
+| `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
+| `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
 
@@ -180,7 +182,9 @@ Two seams, selected by `AV2_GPU_SAD`:
 | `AV2_GPU_SAD=1` (or `batch`) | `av2/encoder/mcomp.c` diamond search | each 4-candidate group in one dispatch |
 | `AV2_GPU_SAD=single` | `avm_dsp/sad.c::highbd_sad()` | one block per call (debugging) |
 | `AV2_GPU_SAD=all` | both | per-call fallback plus batched groups |
-| `AV2_GPU_VAR=1` | `avm_dsp/variance.c::highbd_variance64()` | every variance/SSE block in the encoder's RD decisions |
+| `AV2_GPU_VAR=1` | `avm_dsp/variance.c::highbd_variance64()` | variance/SSE blocks of at least `AV2_GPU_VAR_MIN_AREA` samples (default 1024), memoised by block content |
+| `AV2_GPU_VAR_MIN_AREA=N` | `avm_gpu/vulkan_hook_var.c` | block area below which the call stays on the CPU (`0` = every block) |
+| `AV2_GPU_VAR_MEMO=0` | `avm_gpu/vulkan_hook_var.c` | disable the content-keyed memo (A/B switch) |
 | `AV2_GPU_SAD_RESIDENT=0` | `avm_gpu/vulkan_hook.c` | drop source-block residency inside a search (A/B switch) |
 | `AV2_GPU_SAD_LOOKAHEAD=0` | `av2/encoder/mcomp.c` | one dispatch per search step instead of one per two steps (A/B switch, also a ctest case) |
 
@@ -193,9 +197,27 @@ AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./avmenc --limit=3 --good --cpu-used=8 \
     --threads=1 -o out.ivf clip.y4m
 ```
 
-The variance seam covers all 4x4..256x256 variance sizes, because they all
-funnel through `highbd_variance64()`; `AV2_GPU_VAR_STATS=1` prints the block
-count.
+### Variance seam
+
+The variance seam sits in `highbd_variance64()`, so it sees every variance and
+SSE request of the encoder (4x4..256x256). Two things make it pay:
+
+- **Content-keyed memo.** `(sse, sum)` is a pure function of the two blocks and
+  their shape, so the key can be the content itself: a 64-bit FNV-1a over both
+  blocks plus a 32-bit checksum and the shape. A hit cannot go stale, and no
+  scope or generation token is needed. In the gate clip 44 % of the calls are
+  exact repeats of an earlier pair (the same source block against the same
+  predictor in several RD trials); with a 256 K-entry direct-mapped table the
+  hit rate is 51 %.
+- **Block-area threshold.** A dispatch costs a fence round trip (~0.2 ms through
+  MoltenVK) while a 16x16 variance is well under a microsecond, so calls below
+  `AV2_GPU_VAR_MIN_AREA` samples (default 1024, i.e. 32x32) stay on the CPU.
+  77 % of the clip's calls are 4x4..8x8; they are cheaper on the CPU than the
+  descriptor update alone. The remaining 5,261 calls still go through the
+  kernel, so the seam stays live and gated.
+
+`AV2_GPU_VAR_STATS=1` prints the per-area call histogram, the memo hit rate and
+the number of blocks the kernel priced.
 
 ### Search lookahead
 
@@ -240,6 +262,15 @@ Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 | + source residency (`AV2_GPU_SAD=1`, `AVM_GPU_PACK16=1`) | 714,775 | 80,895 | 17.0 s | md5 `cd833e6f...` |
 | + search lookahead (one dispatch per two steps) | 2,674,812 | 51,403 | **12.3 s** | md5 `cd833e6f...` |
 | + search lookahead, `AV2_GPU_ARENA=1` | 2,674,812 | 51,403 | 12.8 s | md5 `cd833e6f...` |
+
+Variance seam, same clip (`AV2_GPU_VAR=1`, whole encode):
+
+| run | kernel blocks | wall time | bitstream |
+|---|---:|---:|---|
+| CPU only | - | 0.87 s | md5 `cd833e6f...` |
+| every block, no memo (`AV2_GPU_VAR_MIN_AREA=0 AV2_GPU_VAR_MEMO=0`) | 457,023 | 92.8 s | md5 `cd833e6f...` |
+| every block, memo on | 457,023 (231,476 hits) | 45.9 s | md5 `cd833e6f...` |
+| default (`MIN_AREA=1024`, memo on) | 5,261 (1,367 hits) | **1.9 s** | md5 `cd833e6f...` |
 
 Batching, the reusable expansion scratch and packed storage took the GPU encode
 from 440.5 s to 35.7 s (12.3x) with the same bitstream. It is still ~19x slower
@@ -318,6 +349,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       bitstream gate
 - [x] source-block residency per search and one-step search lookahead
       (80,895 -> 51,403 dispatches, 18.1 s -> 12.3 s, same md5)
+- [x] variance seam: content-keyed memo + block-area threshold
+      (457,023 -> 5,261 kernel blocks, 92.8 s -> 1.9 s, same md5)
 - [x] device-local arena + staging copies, opt-in, gated for SAD and variance
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
