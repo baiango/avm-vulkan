@@ -29,10 +29,11 @@ struct avm_gpu_sad {
   uint32_t *widen; /* scratch for the M0 u16 -> u32 expansion */
   size_t widen_cap;
   int src_stride, ref_stride;
+  int packed; /* M1: two samples per word, no expansion on upload */
 };
 
 typedef struct push_constants {
-  uint32_t bw, bh, src_stride, ref_stride, count;
+  uint32_t bw, bh, src_stride, ref_stride, count, packed;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -101,18 +102,32 @@ int avm_gpu_sad_set_planes(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
   }
   const size_t src_n = (size_t)src_stride * (size_t)src_rows;
   const size_t ref_n = (size_t)ref_stride * (size_t)ref_rows;
-  if (widen_into(sad, src, src_n, ref, ref_n) != 0) {
-    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
-    return -1;
-  }
-  const VkDeviceSize src_bytes = (VkDeviceSize)src_n * 4;
-  const VkDeviceSize ref_bytes = (VkDeviceSize)ref_n * 4;
+
+  /* M1 packed layout needs even strides so a row maps onto whole words. */
+  const char *pack_env = getenv("AVM_GPU_PACK16");
+  sad->packed = pack_env && *pack_env && *pack_env != '0' &&
+                (src_stride % 2) == 0 && (ref_stride % 2) == 0;
+
+  const VkDeviceSize src_bytes =
+      sad->packed ? (VkDeviceSize)(src_n * 2) : (VkDeviceSize)(src_n * 4);
+  const VkDeviceSize ref_bytes =
+      sad->packed ? (VkDeviceSize)(ref_n * 2) : (VkDeviceSize)(ref_n * 4);
   if (ensure_buf(ctx, &sad->src, &sad->src_cap, src_bytes, err) ||
       ensure_buf(ctx, &sad->ref, &sad->ref_cap, ref_bytes, err)) {
     return -1;
   }
-  memcpy(sad->src.mapped, sad->widen, (size_t)src_bytes);
-  memcpy(sad->ref.mapped, sad->widen + src_n, (size_t)ref_bytes);
+  if (sad->packed) {
+    /* Two adjacent 16-bit samples already are one little-endian word. */
+    memcpy(sad->src.mapped, src, (size_t)src_bytes);
+    memcpy(sad->ref.mapped, ref, (size_t)ref_bytes);
+  } else {
+    if (widen_into(sad, src, src_n, ref, ref_n) != 0) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+    memcpy(sad->src.mapped, sad->widen, (size_t)src_bytes);
+    memcpy(sad->ref.mapped, sad->widen + src_n, (size_t)ref_bytes);
+  }
   sad->src_stride = src_stride;
   sad->ref_stride = ref_stride;
   return 0;
@@ -136,8 +151,9 @@ int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
 
   /* One workgroup per candidate: the whole batch rides one dispatch. */
   const avm_gpu_buf bufs[4] = { sad->src, sad->ref, sad->pos, sad->cost };
-  push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)sad->src_stride,
-                        (uint32_t)sad->ref_stride, (uint32_t)n };
+  push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
+                        (uint32_t)sad->src_stride, (uint32_t)sad->ref_stride,
+                        (uint32_t)n,    (uint32_t)sad->packed };
   const int rc = avm_gpu_pipeline_dispatch(ctx, sad->pipe, bufs, 4, &pc,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc == 0) memcpy(cost, sad->cost.mapped, (size_t)cost_bytes);

@@ -271,11 +271,12 @@ the integration gate encodes a 3-frame 64×64 clip:
 | CPU SAD | 1.86 s | md5 `cd833e6f...` |
 | `AV2_GPU_SAD=single`, one dispatch per call | 440.5 s | md5 `cd833e6f...` |
 | `AV2_GPU_SAD=1`, batched, 4 candidates per dispatch (178,249 dispatches) | 73.9 s | md5 `cd833e6f...` |
+| same + `AVM_GPU_PACK16=1` (packed 16-bit storage) | 35.7 s | md5 `cd833e6f...` |
 
-Batching bought 6.0x, but the GPU path is still ~40x slower than the CPU here:
-each dispatch costs ~0.4 ms through MoltenVK and planes are re-packed per call.
-The remaining work is structural — price whole search steps, keep frames
-resident, then the M1 storage/arena change. Entropy coding, CDF state, headers
+Batching plus packed 16-bit storage bought 12.3x, but the GPU path is still
+~19x slower than the CPU here: each dispatch costs ~0.2 ms through MoltenVK and
+the block is re-packed per call. The remaining work is structural — price whole
+search steps, then keep frames resident in a device-local arena. Entropy coding, CDF state, headers
 and rate control stay on the CPU by design.
 
 ## Testing

@@ -38,13 +38,14 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
 
-## Data model (M0)
+## Data model
 
-- **Planes are uploaded as one 16-bit sample per 32-bit word.** This avoids
-  `VK_KHR_16bit_storage` and keeps the shader to plain `u32` arithmetic. The
-  cost is 2× upload bandwidth and 2× SSBO footprint; M1 replaces this with
-  `ushort` storage when the extension/feature is present, keeping the same
-  kernel signature.
+- **Two layouts, one kernel.** With `AVM_GPU_PACK16=1` planes are uploaded as
+  **two little-endian 16-bit samples per 32-bit word** (M1): the host `memcpy`s
+  the plane straight into the SSBO and the shader unpacks. Without it the M0
+  layout (one sample per word) is used. Both layouts are gated by the same
+  parity tests, and the packed one halves buffer size and upload bytes.
+  Packed mode requires even strides; odd strides fall back to the M0 layout.
 - Buffers are host-visible and coherent: planes are uploaded by `memcpy` and
   results read back after the fence. M1 stages through device-local memory with
   a copy queue and a persistent arena (the same shape as the VRAM arena in the
@@ -95,18 +96,19 @@ Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 | CPU SAD | - | - | 1.86 s | 1020 B, md5 `cd833e6f...` |
 | `AV2_GPU_SAD=single` (one dispatch per SAD call) | 1,211,438 | 1,211,438 | 440.5 s | md5 `cd833e6f...` |
 | `AV2_GPU_SAD=1` (batched, 4 candidates per dispatch) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1 AVM_GPU_PACK16=1` (batched + packed storage) | 712,996 | 178,249 | 35.7 s | md5 `cd833e6f...` |
 
-Batching plus the reusable u16->u32 scratch took the GPU encode from 440.5 s to
-73.9 s (6.0x) with the same bitstream. It is still ~40x slower than the CPU on
-this machine: each dispatch costs ~0.4 ms through MoltenVK and the whole frame
-is re-packed per call. The remaining fixes are structural, not micro:
+Batching, the reusable expansion scratch and packed storage took the GPU encode
+from 440.5 s to 35.7 s (12.3x) with the same bitstream. It is still ~19x slower
+than the CPU on this machine: each dispatch costs ~0.2 ms through MoltenVK and
+the block is re-packed per call. The remaining fixes are structural, not micro:
 
 1. Price the **whole search step** (up to 12 candidates) instead of 4-point
    groups, cutting dispatch count another ~3x.
 2. Keep the **source and reference frames resident** for the duration of a
    block's search instead of re-packing planes per call.
-3. Only then is the M1 data model (16-bit storage, device-local arena) the next
-   bottleneck.
+3. Add the device-local arena so planes are staged once per frame instead of
+   per call (packed storage already halves the traffic).
 
 ## Build and run
 
@@ -156,8 +158,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
-- Data model: 16-bit samples still occupy 32-bit words, and buffers are
-  host-visible; the `ushort` storage and device-local arena are M1.
+- Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1`, but
+  buffers are still host-visible and re-uploaded per call; the device-local
+  arena is still to do.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

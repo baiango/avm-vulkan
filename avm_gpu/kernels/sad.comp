@@ -22,9 +22,23 @@ layout(push_constant) uniform PC {
   uint src_stride;
   uint ref_stride;
   uint count;
+  uint packed;  // 1 = two 16-bit samples per word (M1), 0 = one per word (M0)
 } pc;
 
 shared uint red[256];
+
+// M1 packed layout: two little-endian 16-bit samples per 32-bit word.
+uint samp(const uint i) {
+  if (pc.packed == 0u) return s[i];
+  const uint w = s[i >> 1u];
+  return (w >> ((i & 1u) * 16u)) & 0xffffu;
+}
+
+uint rsamp(const uint i) {
+  if (pc.packed == 0u) return r[i];
+  const uint w = r[i >> 1u];
+  return (w >> ((i & 1u) * 16u)) & 0xffffu;
+}
 
 void main() {
   const uint wg = gl_WorkGroupID.x;
@@ -37,8 +51,8 @@ void main() {
       const uint so = p.x + y * pc.src_stride;
       const uint ro = p.y + y * pc.ref_stride;
       for (uint x = 0u; x < pc.bw; ++x) {
-        const uint a = s[so + x];
-        const uint b = r[ro + x];
+        const uint a = samp(so + x);
+        const uint b = rsamp(ro + x);
         acc += a > b ? a - b : b - a;
       }
     }
