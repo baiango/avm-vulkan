@@ -34,6 +34,9 @@ extern const int tx_kernel_dct2_size32[4][32][32];
 extern const int tx_kernel_adst_size4[4][4][4];
 extern const int tx_kernel_adst_size8[4][8][8];
 extern const int tx_kernel_adst_size16[4][16][16];
+extern const int tx_kernel_fdst_size4[4][4][4];
+extern const int tx_kernel_fdst_size8[4][8][8];
+extern const int tx_kernel_fdst_size16[4][16][16];
 
 #define W 128
 #define H 128
@@ -73,6 +76,16 @@ static const int *idtx_for(int n, int slot) {
   memset(g_idtx[slot], 0, sizeof(g_idtx[slot]));
   for (int i = 0; i < n; i++) g_idtx[slot][i * n + i] = kScale[idx];
   return g_idtx[slot];
+}
+
+/* FLIPADST maps to DCT8 in g_hor/g_ver_tx_type, which inv_transform_1d_c
+ * dispatches to inv_txfm_fdst_sizeN_c (tx_kernel_fdst_sizeN). */
+static const int *fdst_for(int n) {
+  switch (n) {
+    case 4: return &tx_kernel_fdst_size4[INV_TXFM][0][0];
+    case 8: return &tx_kernel_fdst_size8[INV_TXFM][0][0];
+    default: return &tx_kernel_fdst_size16[INV_TXFM][0][0];
+  }
 }
 
 /* The "ADST" side of the AV2 primary tx types is inv_txfm_adst_sizeN_c,
@@ -176,8 +189,13 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
          : ttype == IDTX      ? "IDTX"
          : ttype == V_DCT     ? "V_DCT"
          : ttype == H_DCT     ? "H_DCT"
-         : ttype == V_ADST    ? "V_ADST"
-                              : "H_ADST",
+         : ttype == V_ADST        ? "V_ADST"
+         : ttype == H_ADST        ? "H_ADST"
+         : ttype == FLIPADST_DCT  ? "FLIP_DCT"
+         : ttype == DCT_FLIPADST  ? "DCT_FLIP"
+         : ttype == FLIPADST_FLIPADST ? "FLIP_FLIP"
+         : ttype == ADST_FLIPADST ? "ADST_FLIP"
+                                  : "FLIP_ADST",
          blocks, cpu_ms, gpu_ms, diff ? "MISMATCH" : "ok");
 
   free(ref);
@@ -255,13 +273,30 @@ int main(void) {
     { 4, 4, TX_4X4, V_ADST, 2, 1 },     { 8, 8, TX_8X8, V_ADST, 2, 1 },
     { 16, 16, TX_16X16, V_ADST, 2, 1 }, { 4, 4, TX_4X4, H_ADST, 1, 2 },
     { 8, 8, TX_8X8, H_ADST, 1, 2 },     { 16, 16, TX_16X16, H_ADST, 1, 2 },
+    /* FLIPADST combinations: 3 = fdst per pass */
+    { 4, 4, TX_4X4, FLIPADST_DCT, 0, 3 },  { 8, 8, TX_8X8, FLIPADST_DCT, 0, 3 },
+    { 16, 16, TX_16X16, FLIPADST_DCT, 0, 3 },
+    { 4, 8, TX_4X8, FLIPADST_DCT, 0, 3 },  { 8, 16, TX_8X16, FLIPADST_DCT, 0, 3 },
+    { 4, 4, TX_4X4, DCT_FLIPADST, 3, 0 },  { 8, 8, TX_8X8, DCT_FLIPADST, 3, 0 },
+    { 16, 16, TX_16X16, DCT_FLIPADST, 3, 0 },
+    { 4, 8, TX_4X8, DCT_FLIPADST, 3, 0 },  { 8, 16, TX_8X16, DCT_FLIPADST, 3, 0 },
+    { 4, 4, TX_4X4, FLIPADST_FLIPADST, 3, 3 },
+    { 8, 8, TX_8X8, FLIPADST_FLIPADST, 3, 3 },
+    { 16, 16, TX_16X16, FLIPADST_FLIPADST, 3, 3 },
+    { 4, 8, TX_4X8, FLIPADST_FLIPADST, 3, 3 },
+    { 4, 4, TX_4X4, ADST_FLIPADST, 3, 1 }, { 8, 8, TX_8X8, ADST_FLIPADST, 3, 1 },
+    { 16, 16, TX_16X16, ADST_FLIPADST, 3, 1 },
+    { 4, 4, TX_4X4, FLIPADST_ADST, 1, 3 }, { 8, 8, TX_8X8, FLIPADST_ADST, 1, 3 },
+    { 16, 16, TX_16X16, FLIPADST_ADST, 1, 3 },
   };
   for (size_t i = 0; i < sizeof(kAdst) / sizeof(kAdst[0]); i++) {
     const int *mrow = kAdst[i].row_fdst == 1 ? adst_for(kAdst[i].w)
                       : kAdst[i].row_fdst == 2 ? NULL /* idtx below */
+                      : kAdst[i].row_fdst == 3 ? fdst_for(kAdst[i].w)
                                                : matrix_for(kAdst[i].w);
     const int *mcol = kAdst[i].col_fdst == 1 ? adst_for(kAdst[i].h)
                       : kAdst[i].col_fdst == 2 ? NULL
+                      : kAdst[i].col_fdst == 3 ? fdst_for(kAdst[i].h)
                                                : matrix_for(kAdst[i].h);
     const int *mrow_i =
         kAdst[i].row_fdst == 2 ? idtx_for(kAdst[i].w, 0) : mrow;

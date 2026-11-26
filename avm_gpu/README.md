@@ -1,8 +1,8 @@
 # avm_gpu — Vulkan compute backend for AVM
 
 Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
-`highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST and IDTX
-primary types, square and rectangular 4..32) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
+`highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST, IDTX and FLIPADST primary types, square and
+rectangular 4..32) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel
 convolve, generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
 **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
@@ -38,7 +38,9 @@ and throughput is not claimed — this milestone is about correctness.
   for DCT_DCT in all 16 square and rectangular sizes from 4 to 32 and for the
   ADST primary types (ADST_DCT, DCT_ADST, ADST_ADST) up to 16 and for IDTX /
   V_DCT / H_DCT / V_ADST / H_ADST (identity is a scaled diagonal matrix:
-  128, 181, 256, 362 for sizes 4, 8, 16, 32), including
+  128, 181, 256, 362 for sizes 4, 8, 16, 32) and for FLIPADST_DCT /
+  DCT_FLIPADST / FLIPADST_FLIPADST / ADST_FLIPADST / FLIPADST_ADST (DCT8 maps
+  to inv_txfm_fdst_sizeN_c), including
   `clamp_buf`, the per-size `inv_tx_shift` pairs, the `NewInvSqrt2` pre-scale
   for odd log2(w)+log2(h), the transposed pass layout (the row pass uses the
   width matrix with a height stride) and `highbd_clip_pixel_add` (gate:
@@ -221,7 +223,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
 - [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability, edges)
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
-- [x] inverse DCT + ADST + IDTX, square/rectangular 4..32 + parity gate
+- [x] inverse DCT + ADST + IDTX + FLIPADST, 4..32 + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
@@ -235,7 +237,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
-- Kernel families still missing: FLIPADST and DDT inverse types and the
+- Kernel families still missing: the DDT experiment types (DDTX/FDDT) and the
   64-wide transform sizes, compound/warp inter and scaled reference
   prediction (x_step_q4 != 16), and loop restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
