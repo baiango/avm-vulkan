@@ -1,0 +1,136 @@
+#version 450
+// CDEF (constrained directional enhancement filter), one invocation per
+// output pixel.
+//
+// Mirrors av2/common/cdef_block.c cdef_filter_block_internal() and the four
+// av2_cdef_filter_16_{0,1,2,3}_c wrappers, including constrain()'s
+// damping-dependent shift, the pri/sec tap tables, the CDEF_VERY_LARGE
+// min/max handling and the final clamp when both stages are enabled.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer In { uint in_px[]; };
+layout(std430, binding = 1) writeonly buffer Out { uint out_px[]; };
+
+layout(push_constant) uniform PC {
+  uint stride;       // CDEF_BSTRIDE layout of the input buffer
+  uint i0;           // block origin row in the buffer
+  uint j0;           // block origin column
+  uint w;
+  uint h;
+  uint dir;
+  uint pri_strength;
+  uint sec_strength;
+  uint pri_damping;
+  uint sec_damping;
+  uint coeff_shift;
+  uint enable_pri;
+  uint enable_sec;
+  uint very_large;
+  uint dstride;
+  uint pad;
+} pc;
+
+const ivec2 DIR[8][2] = ivec2[8][2](
+    ivec2[2](ivec2(-1, 1), ivec2(-2, 2)),
+    ivec2[2](ivec2(0, 1),  ivec2(-1, 2)),
+    ivec2[2](ivec2(0, 1),  ivec2(0, 2)),
+    ivec2[2](ivec2(0, 1),  ivec2(1, 2)),
+    ivec2[2](ivec2(1, 1),  ivec2(2, 2)),
+    ivec2[2](ivec2(1, 0),  ivec2(2, 1)),
+    ivec2[2](ivec2(1, 0),  ivec2(2, 0)),
+    ivec2[2](ivec2(1, 0),  ivec2(2, -1)));
+
+const int PRI_TAPS[2][2] = int[2][2](int[2](4, 2), int[2](3, 3));
+const int SEC_TAPS[2] = int[2](2, 1);
+
+int msb(int v) {
+  int r = 0;
+  while (v > 1) {
+    v >>= 1;
+    ++r;
+  }
+  return r;
+}
+
+int constrain(int diff, int threshold, int damping) {
+  if (threshold == 0) return 0;
+  const int shift = max(0, damping - msb(threshold));
+  const int ad = abs(diff);
+  const int mag = min(ad, max(0, threshold - (ad >> shift)));
+  return (diff < 0 ? -mag : mag);
+}
+
+int idx(int r, int c) {
+  return (int(pc.i0) + r) * int(pc.stride) + (int(pc.j0) + c);
+}
+
+int at(int i, int j) { return int(in_px[idx(i, j)]); }
+
+void main() {
+  const int i = int(gl_GlobalInvocationID.y);
+  const int j = int(gl_GlobalInvocationID.x);
+  if (i >= int(pc.h) || j >= int(pc.w)) return;
+
+  const int dir = int(pc.dir);
+  const int pri_strength = int(pc.pri_strength);
+  const int sec_strength = int(pc.sec_strength);
+  const int pri_damping = int(pc.pri_damping);
+  const int sec_damping = int(pc.sec_damping);
+  const int very_large = int(pc.very_large);
+  const bool enable_pri = pc.enable_pri != 0u;
+  const bool enable_sec = pc.enable_sec != 0u;
+  const bool clipping_required = enable_pri && enable_sec;
+
+  int pri_taps[2];
+  const int tapsel = (pri_strength >> int(pc.coeff_shift)) & 1;
+  pri_taps[0] = PRI_TAPS[tapsel][0];
+  pri_taps[1] = PRI_TAPS[tapsel][1];
+
+  const int x = at(i, j);
+  int vsum = 0;
+  int mn = x;
+  int mx = x;
+
+  for (int k = 0; k < 2; ++k) {
+    if (enable_pri) {
+      const ivec2 d = DIR[dir][k];
+      const int p0 = at(i + d.x, j + d.y);
+      const int p1 = at(i - d.x, j - d.y);
+      vsum += pri_taps[k] * constrain(p0 - x, pri_strength, pri_damping);
+      vsum += pri_taps[k] * constrain(p1 - x, pri_strength, pri_damping);
+      if (clipping_required) {
+        if (p0 != very_large) mx = max(p0, mx);
+        if (p1 != very_large) mx = max(p1, mx);
+        mn = min(p0, mn);
+        mn = min(p1, mn);
+      }
+    }
+    if (enable_sec) {
+      const ivec2 d0 = DIR[(dir + 2) & 7][k];
+      const ivec2 d1 = DIR[(dir + 6) & 7][k];
+      const int s0 = at(i + d0.x, j + d0.y);
+      const int s1 = at(i - d0.x, j - d0.y);
+      const int s2 = at(i + d1.x, j + d1.y);
+      const int s3 = at(i - d1.x, j - d1.y);
+      if (clipping_required) {
+        if (s0 != very_large) mx = max(s0, mx);
+        if (s1 != very_large) mx = max(s1, mx);
+        if (s2 != very_large) mx = max(s2, mx);
+        if (s3 != very_large) mx = max(s3, mx);
+        mn = min(s0, mn);
+        mn = min(s1, mn);
+        mn = min(s2, mn);
+        mn = min(s3, mn);
+      }
+      vsum += SEC_TAPS[k] * constrain(s0 - x, sec_strength, sec_damping);
+      vsum += SEC_TAPS[k] * constrain(s1 - x, sec_strength, sec_damping);
+      vsum += SEC_TAPS[k] * constrain(s2 - x, sec_strength, sec_damping);
+      vsum += SEC_TAPS[k] * constrain(s3 - x, sec_strength, sec_damping);
+    }
+  }
+
+  int y = x + ((8 + vsum - (vsum < 0 ? 1 : 0)) >> 4);
+  if (clipping_required) y = min(max(y, mn), mx);
+  out_px[i * int(pc.dstride) + j] = uint(y);
+}

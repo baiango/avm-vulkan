@@ -1,0 +1,143 @@
+/*
+ * Copyright (c) 2021, Alliance for Open Media. All rights reserved
+ *
+ * This source code is subject to the terms of the BSD 3-Clause Clear License
+ * and the Alliance for Open Media Patent License 1.0. If the BSD 3-Clause Clear
+ * License was not distributed with this source code in the LICENSE file, you
+ * can obtain it at aomedia.org/license/software-license/bsd-3-c-c/.  If the
+ * Alliance for Open Media Patent License 1.0 was not distributed with this
+ * source code in the PATENTS file, you can obtain it at
+ * aomedia.org/license/patent-license/.
+ */
+
+#include "avm_gpu/vulkan_cdef.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "avm_gpu/pipeline.h"
+
+#ifndef AVM_GPU_CDEF_SPV_PATH
+#define AVM_GPU_CDEF_SPV_PATH "cdef.spv"
+#endif
+
+#define CDEF_VERY_LARGE_VALUE 0x4000
+
+struct avm_gpu_cdef {
+  avm_gpu_pipeline *pipe;
+  avm_gpu_buf in, out;
+  VkDeviceSize in_cap, out_cap;
+  uint32_t *expand;
+  size_t expand_cap;
+};
+
+typedef struct push_constants {
+  uint32_t stride, i0, j0, w, h, dir, pri_strength, sec_strength, pri_damping,
+      sec_damping, coeff_shift, enable_pri, enable_sec, very_large, dstride,
+      pad;
+} push_constants;
+
+int avm_gpu_cdef_create(avm_gpu_ctx *ctx, avm_gpu_cdef **out,
+                        char err[AVM_GPU_ERR_LEN]) {
+  *out = NULL;
+  avm_gpu_cdef *cd = calloc(1, sizeof(*cd));
+  if (!cd) {
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return -1;
+  }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_CDEF_SPV_PATH, "AVM_GPU_CDEF_SPV",
+                              2, sizeof(push_constants), &cd->pipe,
+                              err) != 0) {
+    free(cd);
+    return -1;
+  }
+  *out = cd;
+  return 0;
+}
+
+void avm_gpu_cdef_destroy(avm_gpu_ctx *ctx, avm_gpu_cdef *cd) {
+  if (!cd) return;
+  avm_gpu_pipeline_destroy(ctx, cd->pipe);
+  avm_gpu_buf_destroy(ctx, &cd->in);
+  avm_gpu_buf_destroy(ctx, &cd->out);
+  free(cd->expand);
+  free(cd);
+}
+
+int avm_gpu_cdef_filter16(avm_gpu_ctx *ctx, avm_gpu_cdef *cd,
+                          const uint16_t *in, int in_rows, int stride, int i0,
+                          int j0, int w, int h, int dir, int pri_strength,
+                          int sec_strength, int pri_damping, int sec_damping,
+                          int coeff_shift, int enable_pri, int enable_sec,
+                          uint16_t *dst, int dstride,
+                          char err[AVM_GPU_ERR_LEN]) {
+  if (!in || !dst || stride <= 0 || in_rows <= 0 || w <= 0 || h <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (dir < 0 || dir > 7) {
+    snprintf(err, AVM_GPU_ERR_LEN, "direction out of range");
+    return -1;
+  }
+
+  const size_t pixels = (size_t)stride * (size_t)in_rows;
+  if (pixels > cd->expand_cap) {
+    free(cd->expand);
+    cd->expand = malloc(pixels * sizeof(*cd->expand));
+    cd->expand_cap = cd->expand ? pixels : 0;
+    if (!cd->expand) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < pixels; i++) cd->expand[i] = in[i];
+
+  if (cd->in_cap < (VkDeviceSize)pixels * 4) {
+    avm_gpu_buf_destroy(ctx, &cd->in);
+    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pixels * 4, &cd->in, err) != 0) {
+      return -1;
+    }
+    cd->in_cap = cd->in.size;
+  }
+  if (cd->out_cap < (VkDeviceSize)dstride * h * 4) {
+    avm_gpu_buf_destroy(ctx, &cd->out);
+    if (avm_gpu_buf_create(ctx, (VkDeviceSize)dstride * h * 4, &cd->out,
+                           err) != 0) {
+      return -1;
+    }
+    cd->out_cap = cd->out.size;
+  }
+  memcpy(cd->in.mapped, cd->expand, pixels * 4);
+
+  const avm_gpu_buf bufs[2] = { cd->in, cd->out };
+  push_constants pc = { (uint32_t)stride,
+                        (uint32_t)i0,
+                        (uint32_t)j0,
+                        (uint32_t)w,
+                        (uint32_t)h,
+                        (uint32_t)dir,
+                        (uint32_t)pri_strength,
+                        (uint32_t)sec_strength,
+                        (uint32_t)pri_damping,
+                        (uint32_t)sec_damping,
+                        (uint32_t)coeff_shift,
+                        (uint32_t)(enable_pri ? 1 : 0),
+                        (uint32_t)(enable_sec ? 1 : 0),
+                        (uint32_t)CDEF_VERY_LARGE_VALUE,
+                        (uint32_t)dstride,
+                        0 };
+  const uint32_t gx = (uint32_t)((w + 7) / 8);
+  const uint32_t gy = (uint32_t)((h + 7) / 8);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, cd->pipe, bufs, 2, &pc,
+                                              sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+
+  const uint32_t *res = cd->out.mapped;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      dst[(size_t)y * dstride + x] = (uint16_t)res[y * dstride + x];
+    }
+  }
+  return 0;
+}
