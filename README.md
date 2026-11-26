@@ -1,5 +1,11 @@
 # AVM
 
+> **Fork notice.** This is [`baiango/avm-vulkan`](https://github.com/baiango/avm-vulkan),
+> a fork of [AOMediaCodec/avm](https://github.com/AOMediaCodec/avm). Upstream
+> AVM is unchanged except for an optional Vulkan compute backend in `avm_gpu/`
+> (off by default, branch `vulkan`). See
+> [Vulkan compute backend](#vulkan-compute-backend-fork) below.
+
 ## Building
 
 ### Prerequisites
@@ -179,6 +185,82 @@ will be used unless you set the following flag when running the encoder:
 ~~~
     # --vmaf-model-path=path/to/model
 ~~~
+
+## Vulkan compute backend (fork)
+
+An optional, self-contained compute backend for the encoder, written in **C11
+against the Vulkan API directly** — no CUDA, no wgpu, no C++ in the module. It
+is **off by default** and **not wired into the encoder** yet; what exists is a
+small set of pixel kernels that are already proven bit-identical to AVM's C
+reference code.
+
+Everything lives in [`avm_gpu/`](avm_gpu/README.md); that file is the module
+documentation. This section is the short version.
+
+### Status
+
+| Kernel | Reference it matches | Gate |
+|---|---|---|
+| high-bitdepth SAD (`sad.comp`) | `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64 | `avm_gpu_sad_test` |
+| variance / SSE (`variance.comp`) | `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths | `avm_gpu_var_test` |
+
+Both gates compare **every block** against the reference on random planes with
+random strides and candidate positions — no tolerance, no PSNR fallback. A
+machine with no Vulkan device returns exit code 77, so the tests skip instead of
+failing.
+
+Branch: `vulkan`. Base: upstream `main` at `1cfda4fa`.
+
+### Build
+
+The backend is gated by the build option `AV2_ENABLE_VULKAN`, which defaults to
+`OFF`. It needs the Vulkan loader plus `glslangValidator` (package `glslang`) to
+turn the GLSL kernels into SPIR-V:
+
+~~~
+    $ cmake -S . -B build-vk -G Ninja \
+          -DAV2_ENABLE_VULKAN=1 -DENABLE_TESTS=1 -DENABLE_EXAMPLES=0
+    $ cmake --build build-vk --target avm_gpu_sad_test avm_gpu_var_test
+    $ ctest --test-dir build-vk -R avm_gpu_
+~~~
+
+On macOS also install MoltenVK and point the loader at its ICD:
+
+~~~
+    $ brew install molten-vk vulkan-loader glslang
+    $ export DYLD_LIBRARY_PATH=/opt/homebrew/lib
+    $ export VK_DRIVER_FILES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
+~~~
+
+`CONFIG_ML_PART_SPLIT=0 -DCONFIG_DIP_EXT_PRUNING=0` drops the vendored
+TensorFlow-lite dependency (it is only reachable through those two encoder
+experiments) and makes a gate build take seconds instead of minutes. It does
+not change any kernel result.
+
+### Design notes
+
+- **Portable subset.** Kernels use shared memory, plain u32 arithmetic and a
+  256-thread workgroup: one workgroup prices one candidate block. Buffers are
+  `std430` storage buffers; planes are uploaded once with
+  `avm_gpu_*_set_planes()` and stay resident.
+- **No 64-bit shader integers.** SSE is carried as an (hi, lo) u32 pair and
+  reduced with explicit carry; the bitdepth scaling and the
+  `sse - sum²/(w·h)` formula run on the host in 64-bit C, copied verbatim from
+  `avm_dsp/variance.c`.
+- **M0 data model.** Each 16-bit sample occupies one 32-bit word, which avoids
+  `VK_KHR_16bit_storage`; M1 replaces this with `ushort` storage behind the same
+  signatures. Buffers are host-visible and coherent; the arena/device-local
+  staging step is not implemented yet.
+
+### Not claimed
+
+These are **correctness** results, not speed. On an Apple M4 through MoltenVK
+the per-dispatch fence floor (~0.2–0.4 ms) dominates work this small, and the
+M4 is a quality-scoring host, not an encoder target. Entropy coding, CDF state,
+headers and rate control stay on the CPU by design. No encoder call site exists
+yet: the first integration step is routing motion-search SAD candidates through
+`avm_gpu_sad_run()` behind a runtime flag and comparing bitstreams with the CPU
+path.
 
 ## Testing
 
