@@ -2,9 +2,9 @@
 
 Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
 `highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT 4x4/8x8 with
-reconstruction add, intra prediction with DC/V/H and the directional zones
-1-3, inter 8-tap subpel convolve, generic deblock, CDEF block filter, CCSO
-block pass), ten gates, and an encoder call site that produces
+reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
+SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel
+convolve, generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
 **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
@@ -31,7 +31,9 @@ and throughput is not claimed — this milestone is about correctness.
   availability rule (no neighbours -> DC_128, one side -> DC_LEFT/DC_TOP) plus
   the frame-clamped edge builder. `avm_gpu_intra_dr_predict()` adds zones 1-3
   and matches `av2_highbd_dr_prediction_z{1,2,3}_c` over 6 direction/size/mrl
-  combinations x 5 sizes x mrl 0-2, pixel for pixel.
+  combinations x 5 sizes x mrl 0-2, pixel for pixel. The SMOOTH family and
+  PAETH match `avm_highbd_{smooth,smooth_v,smooth_h,paeth}_predictor_*_c`
+  for 4x4...64x64; SMOOTH* reads above[bw]/left[bh] and PAETH the top-left.
 - `avm_gpu_itxfm_add()` reproduces `inv_txfm_c()` (`av2/common/idct.c`) for
   TX_4X4/TX_8X8 DCT_DCT, including `clamp_buf`, both shift pairs (7/10, 7/11),
   the transposed pass layout and `highbd_clip_pixel_add` (gate:
@@ -209,7 +211,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] highbd SAD kernel + parity gate (9 sizes x 128 candidates)
 - [x] variance/SSE kernel + parity gate (3 bitdepths x 9 sizes x 128 candidates)
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
-- [x] intra prediction kernel + parity gate (6 modes x 5 sizes, availability, edges)
+- [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability, edges)
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT 4x4/8x8 + reconstruction add + parity gate vs inv_txfm_c
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
@@ -225,10 +227,12 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
-- Kernel families still missing: smooth/paeth intra, the remaining inverse
-  transform types/sizes (ADST, identity, DDT, 16x16+), compound/warp inter and
-  scaled reference prediction (x_step_q4 != 16), and loop restoration
-  (Wiener / self-guided).
+- Kernel families still missing: the remaining inverse transform types/sizes
+  (ADST, identity, DDT, 16x16+), compound/warp inter and scaled reference
+  prediction (x_step_q4 != 16), and loop restoration. Note that AVM 1.0's
+  restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
+  `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
+  and it needs the feature/class context; that port is a separate effort.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

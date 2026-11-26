@@ -18,6 +18,10 @@ layout(std430, binding = 2) writeonly buffer Dst { uint d[]; };
 #define MODE_DC_LEFT 3u
 #define MODE_DC_TOP 4u
 #define MODE_DC_128 5u
+#define MODE_SMOOTH 6u
+#define MODE_SMOOTH_V 7u
+#define MODE_SMOOTH_H 8u
+#define MODE_PAETH 9u
 
 layout(push_constant) uniform PC {
   uint bw;
@@ -25,8 +29,25 @@ layout(push_constant) uniform PC {
   uint mode;
   uint bd;
   uint stride;
-  uint pad;
+  uint tl;  // top-left sample, used by PAETH
 } pc;
+
+const int BLK_LOG2[65] = int[65](
+    0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6);
+
+int divide_round(int value, int bits) { return (value + (1 << (bits - 1))) >> bits; }
+
+int paeth(int left, int top, int tl) {
+  const int base = top + left - tl;
+  const int p_left = abs(base - left);
+  const int p_top = abs(base - top);
+  const int p_tl = abs(base - tl);
+  return (p_left <= p_top && p_left <= p_tl) ? left
+         : (p_top <= p_tl)                   ? top
+                                             : tl;
+}
 
 void main() {
   const uint row = gl_GlobalInvocationID.x;
@@ -49,6 +70,51 @@ void main() {
     dc = (sum + (pc.bw >> 1u)) / pc.bw;
   } else if (pc.mode == MODE_DC_128) {
     dc = 128u << (pc.bd - 8u);
+  }
+
+  if (pc.mode == MODE_SMOOTH || pc.mode == MODE_SMOOTH_V ||
+      pc.mode == MODE_SMOOTH_H) {
+    const int bw = int(pc.bw);
+    const int bh = int(pc.bh);
+    const int bl = int(l[bh]);
+    const int tr = int(a[bw]);
+    const int scale = (BLK_LOG2[bh] - 2 + BLK_LOG2[bw] - 2 + 2) >> 2;
+    const int r = int(row);
+    const int s_top = 32 >> min(BLK_LOG2[64], (r << 1) >> scale);
+    const int lr = int(l[r]);
+    const int blend_bits = BLK_LOG2[32] + 1;
+    for (uint x = 0u; x < pc.bw; x++) {
+      const int c = int(x);
+      int v;
+      if (pc.mode == MODE_SMOOTH_V) {
+        const int predv = bl + divide_round((int(a[c]) - bl) * (bh - 1 - r),
+                                            BLK_LOG2[bh]);
+        v = predv + divide_round((int(a[c]) - predv) * s_top, blend_bits);
+      } else if (pc.mode == MODE_SMOOTH_H) {
+        const int s_left = 32 >> min(BLK_LOG2[64], (c << 1) >> scale);
+        const int predh = tr + divide_round((lr - tr) * (bw - 1 - c),
+                                            BLK_LOG2[bw]);
+        v = predh + divide_round((lr - predh) * s_left, blend_bits);
+      } else {
+        const int s_left = 32 >> min(BLK_LOG2[64], (c << 1) >> scale);
+        int predv = bl + divide_round((int(a[c]) - bl) * (bh - 1 - r),
+                                      BLK_LOG2[bh]);
+        int predh = tr + divide_round((lr - tr) * (bw - 1 - c), BLK_LOG2[bw]);
+        predv = predv + divide_round((int(a[c]) - predv) * s_top, blend_bits);
+        predh = predh + divide_round((lr - predh) * s_left, blend_bits);
+        v = divide_round(predv + predh, 1);
+      }
+      d[row * pc.stride + x] = uint(v);
+    }
+    return;
+  }
+
+  if (pc.mode == MODE_PAETH) {
+    for (uint x = 0u; x < pc.bw; x++) {
+      d[row * pc.stride + x] =
+          uint(paeth(int(l[row]), int(a[x]), int(pc.tl)));
+    }
+    return;
   }
 
   for (uint x = 0u; x < pc.bw; x++) {

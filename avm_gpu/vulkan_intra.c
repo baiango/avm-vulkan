@@ -46,7 +46,7 @@ typedef struct dir_push_constants {
 } dir_push_constants;
 
 typedef struct push_constants {
-  uint32_t bw, bh, mode, bd, stride, pad;
+  uint32_t bw, bh, mode, bd, stride, tl;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -129,15 +129,16 @@ void avm_gpu_intra_edges(const uint16_t *plane, int stride, int x, int y,
   }
 }
 
-int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
-                          const uint16_t *above, const uint16_t *left, int bw,
-                          int bh, int mode, int bd, uint16_t *dst, int stride,
-                          char err[AVM_GPU_ERR_LEN]) {
+int avm_gpu_intra_predict_tl(avm_gpu_ctx *ctx, avm_gpu_intra *in,
+                             const uint16_t *above, const uint16_t *left,
+                             int top_left, int bw, int bh, int mode, int bd,
+                             uint16_t *dst, int stride,
+                             char err[AVM_GPU_ERR_LEN]) {
   if (bw <= 0 || bh <= 0 || bw > INTRA_MAX_DIM || bh > INTRA_MAX_DIM) {
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", bw, bh);
     return -1;
   }
-  if (mode < AVM_GPU_INTRA_DC || mode > AVM_GPU_INTRA_DC_128) {
+  if (mode < AVM_GPU_INTRA_DC || mode > AVM_GPU_INTRA_PAETH) {
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported intra mode %d", mode);
     return -1;
   }
@@ -160,20 +161,24 @@ int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
     }
   }
 
-  if (ensure_buf(ctx, &in->above, &in->above_cap, (VkDeviceSize)bw * 4, err) ||
-      ensure_buf(ctx, &in->left, &in->left_cap, (VkDeviceSize)bh * 4, err) ||
+  /* SMOOTH* also reads above[bw] and left[bh] (top-right / bottom-left). */
+  if (ensure_buf(ctx, &in->above, &in->above_cap,
+                 (VkDeviceSize)(bw + 1) * 4, err) ||
+      ensure_buf(ctx, &in->left, &in->left_cap, (VkDeviceSize)(bh + 1) * 4,
+                 err) ||
       ensure_buf(ctx, &in->dst, &in->dst_cap, (VkDeviceSize)pixels * 4, err)) {
     return -1;
   }
   uint32_t *ab = in->above.mapped;
   uint32_t *lf = in->left.mapped;
-  for (int i = 0; i < bw; i++) ab[i] = need_above ? above[i] : dummy;
-  for (int i = 0; i < bh; i++) lf[i] = need_left ? left[i] : dummy;
+  for (int i = 0; i <= bw; i++) ab[i] = need_above ? above[i] : dummy;
+  for (int i = 0; i <= bh; i++) lf[i] = need_left ? left[i] : dummy;
   memset(in->dst.mapped, 0, (size_t)pixels * 4);
 
   const avm_gpu_buf bufs[3] = { in->above, in->left, in->dst };
-  push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)mode,
-                        (uint32_t)bd, (uint32_t)stride, 0 };
+  push_constants pc = { (uint32_t)bw,      (uint32_t)bh, (uint32_t)mode,
+                        (uint32_t)bd,      (uint32_t)stride,
+                        (uint32_t)top_left };
   const int rc = avm_gpu_pipeline_dispatch(ctx, in->pipe, bufs, 3, &pc,
                                            sizeof(pc), 1, err);
   if (rc != 0) return rc;
@@ -238,4 +243,12 @@ int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
     }
   }
   return 0;
+}
+
+int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
+                          const uint16_t *above, const uint16_t *left, int bw,
+                          int bh, int mode, int bd, uint16_t *dst, int stride,
+                          char err[AVM_GPU_ERR_LEN]) {
+  return avm_gpu_intra_predict_tl(ctx, in, above, left, 0, bw, bh, mode, bd,
+                                   dst, stride, err);
 }

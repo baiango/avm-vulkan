@@ -63,8 +63,11 @@ typedef struct {
   }
 
 static const pred_case kModes[] = {
-  PCASE(DC, dc),         PCASE(V, v),           PCASE(H, h),
-  PCASE(DC_LEFT, dc_left), PCASE(DC_TOP, dc_top), PCASE(DC_128, dc_128)
+  PCASE(DC, dc),           PCASE(V, v),
+  PCASE(H, h),             PCASE(DC_LEFT, dc_left),
+  PCASE(DC_TOP, dc_top),   PCASE(DC_128, dc_128),
+  PCASE(SMOOTH, smooth),   PCASE(SMOOTH_V, smooth_v),
+  PCASE(SMOOTH_H, smooth_h), PCASE(PAETH, paeth)
 };
 static const int kSizes[5] = { 4, 8, 16, 32, 64 };
 
@@ -233,25 +236,30 @@ int main(void) {
   failures += check_edges(plane, frame_w, frame_h);
   failures += check_directional(ctx, intra);
 
-  uint16_t above[66], left[66];
+  /* above[0]/left[0] hold the top-left sample, so above+1 is what the C
+   * reference sees as above[0] and above[-1] is in bounds. */
+  uint16_t above[68], left[68];
   uint16_t cpu[64 * STRIDE], gpu[64 * STRIDE];
 
   for (size_t m = 0; m < sizeof(kModes) / sizeof(kModes[0]); m++) {
     for (size_t s = 0; s < 5; s++) {
       const int n = kSizes[s];
-      for (int i = 0; i < n; i++) {
+      /* SMOOTH reads above[bw] and left[bh]; PAETH needs the top-left. */
+      for (int i = 0; i <= n + 1; i++) {
         above[i] = (uint16_t)(rnd() & 0x3ff);
         left[i] = (uint16_t)(rnd() & 0x3ff);
       }
+      const int top_left = above[0];
 
       memset(cpu, 0, sizeof(cpu));
       const double t0 = now_ms();
-      kModes[m].ref[s](cpu, STRIDE, above, left, BD);
+      kModes[m].ref[s](cpu, STRIDE, above + 1, left + 1, BD);
       const double cpu_ms = now_ms() - t0;
 
       const double t1 = now_ms();
-      if (avm_gpu_intra_predict(ctx, intra, above, left, n, n, kModes[m].mode,
-                                BD, gpu, STRIDE, err) != 0) {
+      if (avm_gpu_intra_predict_tl(ctx, intra, above + 1, left + 1, top_left,
+                                   n, n, kModes[m].mode, BD, gpu, STRIDE,
+                                   err) != 0) {
         fprintf(stderr, "avm_gpu intra: %s\n", err);
         return 1;
       }

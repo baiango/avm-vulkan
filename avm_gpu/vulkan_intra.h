@@ -28,7 +28,11 @@ typedef enum avm_gpu_intra_mode {
   AVM_GPU_INTRA_H = 2,
   AVM_GPU_INTRA_DC_LEFT = 3,
   AVM_GPU_INTRA_DC_TOP = 4,
-  AVM_GPU_INTRA_DC_128 = 5
+  AVM_GPU_INTRA_DC_128 = 5,
+  AVM_GPU_INTRA_SMOOTH = 6,
+  AVM_GPU_INTRA_SMOOTH_V = 7,
+  AVM_GPU_INTRA_SMOOTH_H = 8,
+  AVM_GPU_INTRA_PAETH = 9
 } avm_gpu_intra_mode;
 
 typedef struct avm_gpu_intra avm_gpu_intra;
@@ -58,7 +62,8 @@ void avm_gpu_intra_edges(const uint16_t *plane, int stride, int x, int y,
 
 /*
  * Predicts one bw x bh block into dst with the given row stride, reading above
- * (bw samples) and left (bh samples). Matches
+ * (bw samples, plus above[bw] for SMOOTH*) and left (bh samples, plus
+ * left[bh] for SMOOTH*). Matches
  * avm_highbd_{dc,v,h,dc_left,dc_top,dc_128}_predictor_*_c bit for bit.
  */
 /*
@@ -74,6 +79,16 @@ int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *intra,
                              const uint16_t *above, const uint16_t *left,
                              int bw, int bh, int zone, int dx, int dy,
                              int mrl_index, uint16_t *dst, int stride,
+                             char err[AVM_GPU_ERR_LEN]);
+
+/*
+ * Same as avm_gpu_intra_predict(), but for the modes that need the top-left
+ * sample (PAETH) and the far edges (SMOOTH*: above[bw], left[bh]).
+ */
+int avm_gpu_intra_predict_tl(avm_gpu_ctx *ctx, avm_gpu_intra *intra,
+                             const uint16_t *above, const uint16_t *left,
+                             int top_left, int bw, int bh, int mode, int bd,
+                             uint16_t *dst, int stride,
                              char err[AVM_GPU_ERR_LEN]);
 
 int avm_gpu_intra_predict(avm_gpu_ctx *ctx, avm_gpu_intra *intra,
