@@ -1,0 +1,86 @@
+#version 450
+// CCSO (cross-component sample offset), block pass, one invocation per sample.
+//
+// Mirrors av2/common/ccso.c ccso_filter_block_hbd_wo_buf_c(): the same
+// cal_filter_support() quantisation (edge_clf 0 or 1), the same band
+// extraction (src_y >> shift_bits or a single band), the same
+// (band << 4) + (cls0 << 2) + cls1 LUT index and the same offset add with a
+// clamp to [0, max_val].
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer SrcY { uint src_y[]; };
+layout(std430, binding = 1) buffer Dst { uint dst[]; };
+layout(std430, binding = 2) readonly buffer Offsets { int off[]; };
+
+layout(push_constant) uniform PC {
+  uint src_stride;
+  uint dst_stride;
+  uint x0;
+  uint y0;
+  uint blk_w;
+  uint blk_h;
+  uint pic_w;
+  uint pic_h;
+  uint hscale;
+  uint vscale;
+  int thr;
+  int neg_thr;
+  int off0;
+  int off1;
+  uint max_val;
+  uint single_band;
+  uint shift_bits;
+  uint edge_clf;
+  uint bo_only;
+  uint pad;
+} pc;
+
+// rec_y[rec_idx[i]] - rec_y[0]
+int diff_at(int base, int off) { return int(src_y[base + off]) - int(src_y[base]); }
+
+int classify(int d) {
+  int idx;
+  if (pc.edge_clf == 0u) {
+    if (d > pc.thr) {
+      idx = 2;
+    } else if (d < pc.neg_thr) {
+      idx = 0;
+    } else {
+      idx = 1;
+    }
+  } else {
+    idx = d < pc.neg_thr ? 0 : 1;
+  }
+  return idx;
+}
+
+void main() {
+  const int xs = int(gl_GlobalInvocationID.x);
+  const int ys = int(gl_GlobalInvocationID.y);
+
+  const int y_end = min(int(pc.pic_h) - int(pc.y0), int(pc.blk_h));
+  const int x_end = min(int(pc.pic_w) - int(pc.x0), int(pc.blk_w));
+  if (xs >= x_end || ys >= y_end) return;
+
+  // AVM passes row-window pointers to this helper; here the buffers are the
+  // whole planes, so the block origin is folded into both indices.
+  const int x_pos = int(pc.x0) + xs;
+  const int row = int(pc.y0) + ys;
+  const uint src_idx =
+      uint(row << int(pc.vscale)) * pc.src_stride + uint(x_pos << int(pc.hscale));
+  const uint dst_idx = uint(row) * pc.dst_stride + uint(x_pos);
+
+  int cls0 = 0;
+  int cls1 = 0;
+  if (pc.bo_only == 0u) {
+    cls0 = classify(diff_at(int(src_idx), pc.off0));
+    cls1 = classify(diff_at(int(src_idx), pc.off1));
+  }
+
+  const int band_num =
+      pc.single_band != 0u ? 0 : int(src_y[src_idx]) >> int(pc.shift_bits);
+  const int lut_idx = (band_num << 4) + (cls0 << 2) + cls1;
+  const int v = off[lut_idx] + int(dst[dst_idx]);
+  dst[dst_idx] = uint(v < 0 ? 0 : (v > int(pc.max_val) ? int(pc.max_val) : v));
+}
