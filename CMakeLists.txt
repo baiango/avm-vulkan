@@ -1209,5 +1209,10 @@ setup_avm_install_targets()
 # Vulkan compute backend. Off by default; see avm_gpu/README.md.
 option(AV2_ENABLE_VULKAN "Build the Vulkan compute backend in avm_gpu/" OFF)
 if(AV2_ENABLE_VULKAN)
+  # AVM drives its own tests, so ctest is not enabled globally; the avm_gpu
+  # parity gate needs it to be visible from the build root.
+  if(ENABLE_TESTS)
+    enable_testing()
+  endif()
   add_subdirectory(avm_gpu)
 endif()

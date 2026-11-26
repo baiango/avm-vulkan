@@ -41,6 +41,11 @@ add_library(
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}")
+# Vulkan structs are initialised by sType; the remaining fields are required
+# to be zero, so the missing-field diagnostic is noise here.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(avm_gpu PRIVATE -Wno-missing-field-initializers)
+endif()
 target_link_libraries(avm_gpu PUBLIC Vulkan::Vulkan)
 add_dependencies(avm_gpu avm_gpu_shaders)
 
