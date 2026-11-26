@@ -1,8 +1,8 @@
 # avm_gpu — Vulkan compute backend for AVM
 
-Status: **M0 complete, kernels growing.** Three kernels (`highbd SAD`,
-`highbd variance/SSE`, forward DCT 4x4/8x8), four gates, and an encoder call
-site that produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
+Status: **M0 complete, kernels growing.** Four kernel families (`highbd SAD`,
+`highbd variance/SSE`, forward DCT 4x4/8x8, intra prediction), five gates, and
+an encoder call site that produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
 
@@ -23,6 +23,10 @@ and throughput is not claimed — this milestone is about correctness.
   bit-for-bit, including the 64-bit `tran_high_t` products, which are formed
   with `imulExtended` because MoltenVK reports `shaderInt64 = 0` (gate:
   `test/avm_gpu_txfm_test.c`, 4x4 and 8x8, 12-bit and small residual ranges).
+- `avm_gpu_intra_*` matches `avm_highbd_{dc,v,h,dc_left,dc_top,dc_128}_predictor_*_c`
+  for 4x4…64x64 (gate: `test/avm_gpu_intra_test.c`), and carries AVM's block
+  availability rule (no neighbours -> DC_128, one side -> DC_LEFT/DC_TOP) plus
+  the frame-clamped edge builder.
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -35,12 +39,15 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_sad.{h,c}` | resident planes + batched SAD dispatch, pipeline and descriptor caching |
 | `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
 | `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
+| `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
+| `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
 | `test/avm_gpu_var_test.c` | parity gate against `avm_highbd_{8,10,12}_variance*_c` |
 | `test/avm_gpu_txfm_test.c` | parity gate against `avm_fdct4x4_c` / `avm_highbd_fdct8x8_c` |
+| `test/avm_gpu_intra_test.c` | parity gate against the `avm_highbd_*_predictor_*` set, plus rule/edge checks |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, lazy device init, env-gated |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
@@ -160,6 +167,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] highbd SAD kernel + parity gate (9 sizes x 128 candidates)
 - [x] variance/SSE kernel + parity gate (3 bitdepths x 9 sizes x 128 candidates)
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
+- [x] intra prediction kernel + parity gate (6 modes x 5 sizes, availability, edges)
 - [x] encoder call site with byte-identical bitstream gate
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
@@ -169,8 +177,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
-- Kernel families still missing: intra prediction, inverse transforms, inter
-  (MC/compound/warp), and the loop filters (deblock/CDEF/CCSO/restoration).
+- Kernel families still missing: directional (z1/z2/z3) and smooth/paeth intra,
+  inverse transforms, inter (MC/compound/warp), and the loop filters
+  (deblock/CDEF/CCSO/restoration).
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

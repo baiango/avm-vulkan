@@ -1,0 +1,65 @@
+#version 450
+// Intra prediction: DC / V / H / DC_LEFT / DC_TOP / DC_128.
+//
+// Mirrors avm_dsp/intrapred.c (avm_highbd_*_predictor_*_c): same rounding for
+// the DC variants and the same 128 << (bd - 8) neutral value. Edge samples are
+// handed in already clamped and availability-filtered by the host, exactly as
+// av2_predict_intra_block prepares them for the unfiltered paths.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Above { uint a[]; };
+layout(std430, binding = 1) readonly buffer Left { uint l[]; };
+layout(std430, binding = 2) writeonly buffer Dst { uint d[]; };
+
+#define MODE_DC 0u
+#define MODE_V 1u
+#define MODE_H 2u
+#define MODE_DC_LEFT 3u
+#define MODE_DC_TOP 4u
+#define MODE_DC_128 5u
+
+layout(push_constant) uniform PC {
+  uint bw;
+  uint bh;
+  uint mode;
+  uint bd;
+  uint stride;
+  uint pad;
+} pc;
+
+void main() {
+  const uint row = gl_GlobalInvocationID.x;
+  if (row >= pc.bh) return;
+
+  uint dc = 0u;
+  if (pc.mode == MODE_DC) {
+    uint sum = 0u;
+    for (uint i = 0u; i < pc.bw; i++) sum += a[i];
+    for (uint i = 0u; i < pc.bh; i++) sum += l[i];
+    const uint count = pc.bw + pc.bh;
+    dc = (sum + (count >> 1u)) / count;
+  } else if (pc.mode == MODE_DC_LEFT) {
+    uint sum = 0u;
+    for (uint i = 0u; i < pc.bh; i++) sum += l[i];
+    dc = (sum + (pc.bh >> 1u)) / pc.bh;
+  } else if (pc.mode == MODE_DC_TOP) {
+    uint sum = 0u;
+    for (uint i = 0u; i < pc.bw; i++) sum += a[i];
+    dc = (sum + (pc.bw >> 1u)) / pc.bw;
+  } else if (pc.mode == MODE_DC_128) {
+    dc = 128u << (pc.bd - 8u);
+  }
+
+  for (uint x = 0u; x < pc.bw; x++) {
+    uint v;
+    if (pc.mode == MODE_V) {
+      v = a[x];
+    } else if (pc.mode == MODE_H) {
+      v = l[row];
+    } else {
+      v = dc;
+    }
+    d[row * pc.stride + x] = v;
+  }
+}
