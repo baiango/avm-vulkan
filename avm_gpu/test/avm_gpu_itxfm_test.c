@@ -31,6 +31,9 @@ extern const int tx_kernel_dct2_size4[4][4][4];
 extern const int tx_kernel_dct2_size8[4][8][8];
 extern const int tx_kernel_dct2_size16[4][16][16];
 extern const int tx_kernel_dct2_size32[4][32][32];
+extern const int tx_kernel_adst_size4[4][4][4];
+extern const int tx_kernel_adst_size8[4][8][8];
+extern const int tx_kernel_adst_size16[4][16][16];
 
 #define W 128
 #define H 128
@@ -52,15 +55,27 @@ static double now_ms(void) {
 
 static const int *matrix_for(int n) {
   switch (n) {
-    case 4: return &tx_kernel_dct2_size4[0][0][0];
-    case 8: return &tx_kernel_dct2_size8[0][0][0];
-    case 16: return &tx_kernel_dct2_size16[0][0][0];
-    default: return &tx_kernel_dct2_size32[0][0][0];
+    case 4: return &tx_kernel_dct2_size4[INV_TXFM][0][0];
+    case 8: return &tx_kernel_dct2_size8[INV_TXFM][0][0];
+    case 16: return &tx_kernel_dct2_size16[INV_TXFM][0][0];
+    default: return &tx_kernel_dct2_size32[INV_TXFM][0][0];
+  }
+}
+
+/* The "ADST" side of the AV2 primary tx types is inv_txfm_adst_sizeN_c,
+ * which is only defined up to 16 (g_ver_tx_type[ADST_DCT] == ADST). */
+static const int *adst_for(int n) {
+  switch (n) {
+    case 4: return &tx_kernel_adst_size4[INV_TXFM][0][0];
+    case 8: return &tx_kernel_adst_size8[INV_TXFM][0][0];
+    default: return &tx_kernel_adst_size16[INV_TXFM][0][0];
   }
 }
 
 static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
-                       TX_SIZE tx_size, int *failures) {
+                       TX_SIZE tx_size, PRIMARY_TX_TYPE ttype,
+                       const int *mat_row, const int *mat_col,
+                       int *failures) {
   char err[AVM_GPU_ERR_LEN];
   const int n = w * h;
   uint16_t *ref = malloc(sizeof(uint16_t) * STRIDE * H);
@@ -101,7 +116,7 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
   TxfmParam param;
   memset(&param, 0, sizeof(param));
   param.tx_size = tx_size;
-  param.primary_tx_type = DCT_DCT;
+  param.primary_tx_type = ttype;
   param.bd = BD;
   param.eob = n;
   param.lossless = 0;
@@ -115,9 +130,8 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
   const double cpu_ms = now_ms() - t0;
 
   const double t1 = now_ms();
-  if (avm_gpu_itxfm_add_rect(ctx, it, coeffs, pos, blocks, w, h, BD,
-                             matrix_for(w), matrix_for(h), gpu, STRIDE, H,
-                             err) != 0) {
+  if (avm_gpu_itxfm_add_rect(ctx, it, coeffs, pos, blocks, w, h, BD, mat_row,
+                             mat_col, gpu, STRIDE, H, err) != 0) {
     fprintf(stderr, "avm_gpu itxfm: %s\n", err);
     free(ref);
     free(gpu);
@@ -141,8 +155,12 @@ static int check_block(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int w, int h,
     }
   }
   *failures += diff != 0;
-  printf("%2dx%-3d %8d %9.3f %9.3f %s\n", w, h, blocks, cpu_ms, gpu_ms,
-         diff ? "MISMATCH" : "ok");
+  printf("%2dx%-3d %-10s %6d %7.3f %7.3f %s\n", w, h,
+         ttype == DCT_DCT   ? "DCT_DCT"
+         : ttype == ADST_DCT ? "ADST_DCT"
+         : ttype == DCT_ADST ? "DCT_ADST"
+                             : "ADST_ADST",
+         blocks, cpu_ms, gpu_ms, diff ? "MISMATCH" : "ok");
 
   free(ref);
   free(gpu);
@@ -178,13 +196,44 @@ int main(void) {
     return 1;
   }
   printf("device: %s\n", avm_gpu_device_name(ctx));
-  printf("%-5s %8s %9s %9s %s\n", "block", "blocks", "cpu ms", "gpu ms",
-         "parity");
+  printf("%-5s %-10s %6s %7s %7s %s\n", "block", "tx type", "blocks", "cpu ms",
+         "gpu ms", "parity");
 
   int failures = 0;
   for (size_t i = 0; i < sizeof(kSizes) / sizeof(kSizes[0]); i++) {
-    if (check_block(ctx, it, kSizes[i].w, kSizes[i].h, kSizes[i].tx,
+    if (check_block(ctx, it, kSizes[i].w, kSizes[i].h, kSizes[i].tx, DCT_DCT,
+                    matrix_for(kSizes[i].w), matrix_for(kSizes[i].h),
                     &failures) != 0) {
+      return 1;
+    }
+  }
+
+  /* DST7 ("ADST") combinations; the row pass and the column pass can each be
+   * DCT2 or DST7, exactly as g_hor_tx_type/g_ver_tx_type select them. */
+  static const struct {
+    int w, h;
+    TX_SIZE tx;
+    PRIMARY_TX_TYPE ttype;
+    int row_fdst, col_fdst;
+  } kAdst[] = {
+    { 4, 4, TX_4X4, ADST_DCT, 0, 1 },   { 8, 8, TX_8X8, ADST_DCT, 0, 1 },
+    { 16, 16, TX_16X16, ADST_DCT, 0, 1 }, { 4, 8, TX_4X8, ADST_DCT, 0, 1 },
+    { 8, 4, TX_8X4, ADST_DCT, 0, 1 },   { 8, 16, TX_8X16, ADST_DCT, 0, 1 },
+    { 16, 8, TX_16X8, ADST_DCT, 0, 1 }, { 4, 16, TX_4X16, ADST_DCT, 0, 1 },
+    { 16, 4, TX_16X4, ADST_DCT, 0, 1 }, { 4, 4, TX_4X4, DCT_ADST, 1, 0 },
+    { 8, 8, TX_8X8, DCT_ADST, 1, 0 },   { 16, 16, TX_16X16, DCT_ADST, 1, 0 },
+    { 4, 8, TX_4X8, DCT_ADST, 1, 0 },   { 8, 16, TX_8X16, DCT_ADST, 1, 0 },
+    { 4, 16, TX_4X16, DCT_ADST, 1, 0 }, { 4, 4, TX_4X4, ADST_ADST, 1, 1 },
+    { 8, 8, TX_8X8, ADST_ADST, 1, 1 },  { 16, 16, TX_16X16, ADST_ADST, 1, 1 },
+    { 4, 8, TX_4X8, ADST_ADST, 1, 1 },  { 8, 16, TX_8X16, ADST_ADST, 1, 1 },
+  };
+  for (size_t i = 0; i < sizeof(kAdst) / sizeof(kAdst[0]); i++) {
+    const int *mrow = kAdst[i].row_fdst ? adst_for(kAdst[i].w)
+                                        : matrix_for(kAdst[i].w);
+    const int *mcol = kAdst[i].col_fdst ? adst_for(kAdst[i].h)
+                                        : matrix_for(kAdst[i].h);
+    if (check_block(ctx, it, kAdst[i].w, kAdst[i].h, kAdst[i].tx,
+                    kAdst[i].ttype, mrow, mcol, &failures) != 0) {
       return 1;
     }
   }
