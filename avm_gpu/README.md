@@ -26,6 +26,7 @@ and throughput is not claimed — this milestone is about correctness.
 | Path | Contents |
 |---|---|
 | `vulkan_gpu.{h,c}` | instance/device/queue/command pool/fence, host-visible buffers, sync submit |
+| `pipeline.{h,c}` | shared SPIR-V/descriptor/push-constant/pipeline setup and dispatch for every kernel |
 | `vulkan_sad.{h,c}` | resident planes + batched SAD dispatch, pipeline and descriptor caching |
 | `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
@@ -149,8 +150,6 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Entropy coding, CDF state, headers, rate control: CPU by design.
 - Data model: 16-bit samples still occupy 32-bit words, and buffers are
   host-visible; the `ushort` storage and device-local arena are M1.
-- `vulkan_sad.c` and `vulkan_var.c` duplicate the pipeline/descriptor setup;
-  fold them into one `avm_gpu_pipeline` helper before a third kernel lands.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

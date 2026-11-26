@@ -16,18 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/pipeline.h"
+
 #ifndef AVM_GPU_VAR_SPV_PATH
 #define AVM_GPU_VAR_SPV_PATH "variance.spv"
 #endif
 
 struct avm_gpu_var {
-  VkShaderModule module;
-  VkDescriptorSetLayout dsl;
-  VkPipelineLayout layout;
-  VkPipeline pipeline;
-  VkDescriptorPool pool;
-  VkCommandBuffer cb;
-  VkDescriptorSet ds;
+  avm_gpu_pipeline *pipe;
   avm_gpu_buf src, ref, pos, res;
   VkDeviceSize src_cap, ref_cap, pos_cap, res_cap;
   int src_stride, ref_stride;
@@ -41,35 +37,6 @@ typedef struct push_constants {
 typedef struct block_result {
   uint32_t sse_hi, sse_lo, sum, pad;
 } block_result;
-
-static const char *spv_path(void) {
-  const char *env = getenv("AVM_GPU_VAR_SPV");
-  return env && *env ? env : AVM_GPU_VAR_SPV_PATH;
-}
-
-static int read_file(const char *path, void **data, size_t *size) {
-  FILE *f = fopen(path, "rb");
-  if (!f) return -1;
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return -1;
-  }
-  long n = ftell(f);
-  if (n <= 0 || fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    return -1;
-  }
-  void *buf = malloc((size_t)n);
-  if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
-    free(buf);
-    fclose(f);
-    return -1;
-  }
-  fclose(f);
-  *data = buf;
-  *size = (size_t)n;
-  return 0;
-}
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
                       VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
@@ -88,127 +55,22 @@ int avm_gpu_var_create(avm_gpu_ctx *ctx, avm_gpu_var **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  const VkDevice dev = avm_gpu_device(ctx);
-
-  void *code = NULL;
-  size_t code_size = 0;
-  if (read_file(spv_path(), &code, &code_size) != 0) {
-    snprintf(err, AVM_GPU_ERR_LEN, "cannot read SPIR-V '%s'", spv_path());
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_VAR_SPV_PATH, "AVM_GPU_VAR_SPV", 4,
+                              sizeof(push_constants), &v->pipe, err) != 0) {
     free(v);
     return -1;
   }
-  VkShaderModuleCreateInfo smci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-  smci.codeSize = code_size;
-  smci.pCode = (const uint32_t *)code;
-  VkResult r = vkCreateShaderModule(dev, &smci, NULL, &v->module);
-  free(code);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkCreateShaderModule (%d)", (int)r);
-    free(v);
-    return -1;
-  }
-
-  VkDescriptorSetLayoutBinding bind[4];
-  for (int i = 0; i < 4; i++) {
-    memset(&bind[i], 0, sizeof(bind[i]));
-    bind[i].binding = (uint32_t)i;
-    bind[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bind[i].descriptorCount = 1;
-    bind[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-  }
-  VkDescriptorSetLayoutCreateInfo dslci = {
-    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
-  };
-  dslci.bindingCount = 4;
-  dslci.pBindings = bind;
-  r = vkCreateDescriptorSetLayout(dev, &dslci, NULL, &v->dsl);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkCreateDescriptorSetLayout (%d)", (int)r);
-    vkDestroyShaderModule(dev, v->module, NULL);
-    free(v);
-    return -1;
-  }
-
-  VkPushConstantRange pcr;
-  memset(&pcr, 0, sizeof(pcr));
-  pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-  pcr.size = sizeof(push_constants);
-  VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-  plci.setLayoutCount = 1;
-  plci.pSetLayouts = &v->dsl;
-  plci.pushConstantRangeCount = 1;
-  plci.pPushConstantRanges = &pcr;
-  r = vkCreatePipelineLayout(dev, &plci, NULL, &v->layout);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkCreatePipelineLayout (%d)", (int)r);
-    avm_gpu_var_destroy(ctx, v);
-    return -1;
-  }
-
-  VkComputePipelineCreateInfo cpci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
-  cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-  cpci.stage.module = v->module;
-  cpci.stage.pName = "main";
-  cpci.layout = v->layout;
-  r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &v->pipeline);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkCreateComputePipelines (%d)", (int)r);
-    avm_gpu_var_destroy(ctx, v);
-    return -1;
-  }
-
-  VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 };
-  VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-  dpci.maxSets = 1;
-  dpci.poolSizeCount = 1;
-  dpci.pPoolSizes = &ps;
-  r = vkCreateDescriptorPool(dev, &dpci, NULL, &v->pool);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkCreateDescriptorPool (%d)", (int)r);
-    avm_gpu_var_destroy(ctx, v);
-    return -1;
-  }
-
-  VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-  dsai.descriptorPool = v->pool;
-  dsai.descriptorSetCount = 1;
-  dsai.pSetLayouts = &v->dsl;
-  r = vkAllocateDescriptorSets(dev, &dsai, &v->ds);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkAllocateDescriptorSets (%d)", (int)r);
-    avm_gpu_var_destroy(ctx, v);
-    return -1;
-  }
-
-  VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-  cbai.commandPool = avm_gpu_command_pool(ctx);
-  cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cbai.commandBufferCount = 1;
-  r = vkAllocateCommandBuffers(dev, &cbai, &v->cb);
-  if (r != VK_SUCCESS) {
-    snprintf(err, AVM_GPU_ERR_LEN, "vkAllocateCommandBuffers (%d)", (int)r);
-    avm_gpu_var_destroy(ctx, v);
-    return -1;
-  }
-
   *out = v;
   return 0;
 }
 
 void avm_gpu_var_destroy(avm_gpu_ctx *ctx, avm_gpu_var *v) {
   if (!v) return;
-  const VkDevice dev = avm_gpu_device(ctx);
-  if (v->cb) vkFreeCommandBuffers(dev, avm_gpu_command_pool(ctx), 1, &v->cb);
+  avm_gpu_pipeline_destroy(ctx, v->pipe);
   avm_gpu_buf_destroy(ctx, &v->src);
   avm_gpu_buf_destroy(ctx, &v->ref);
   avm_gpu_buf_destroy(ctx, &v->pos);
   avm_gpu_buf_destroy(ctx, &v->res);
-  if (v->pool) vkDestroyDescriptorPool(dev, v->pool, NULL);
-  if (v->pipeline) vkDestroyPipeline(dev, v->pipeline, NULL);
-  if (v->layout) vkDestroyPipelineLayout(dev, v->layout, NULL);
-  if (v->dsl) vkDestroyDescriptorSetLayout(dev, v->dsl, NULL);
-  if (v->module) vkDestroyShaderModule(dev, v->module, NULL);
   free(v);
 }
 
@@ -273,7 +135,6 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported bitdepth %d", bitdepth);
     return -1;
   }
-  const VkDevice dev = avm_gpu_device(ctx);
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
   const VkDeviceSize res_bytes = (VkDeviceSize)n * sizeof(block_result);
   if (ensure_buf(ctx, &v->pos, &v->pos_cap, pos_bytes, err) ||
@@ -282,38 +143,11 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
   }
   memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
 
-  VkDescriptorBufferInfo info[4] = { { v->src.buffer, 0, VK_WHOLE_SIZE },
-                                     { v->ref.buffer, 0, VK_WHOLE_SIZE },
-                                     { v->pos.buffer, 0, VK_WHOLE_SIZE },
-                                     { v->res.buffer, 0, VK_WHOLE_SIZE } };
-  VkWriteDescriptorSet wr[4];
-  for (int i = 0; i < 4; i++) {
-    memset(&wr[i], 0, sizeof(wr[i]));
-    wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wr[i].dstSet = v->ds;
-    wr[i].dstBinding = (uint32_t)i;
-    wr[i].descriptorCount = 1;
-    wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    wr[i].pBufferInfo = &info[i];
-  }
-  vkUpdateDescriptorSets(dev, 4, wr, 0, NULL);
-
-  VkCommandBuffer cb = v->cb;
-  vkResetCommandBuffer(cb, 0);
-  VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(cb, &bi);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, v->pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, v->layout, 0, 1,
-                          &v->ds, 0, NULL);
+  const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
   push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)v->src_stride,
                         (uint32_t)v->ref_stride, (uint32_t)n };
-  vkCmdPushConstants(cb, v->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc),
-                     &pc);
-  vkCmdDispatch(cb, (uint32_t)n, 1, 1);
-  vkEndCommandBuffer(cb);
-
-  const int rc = avm_gpu_submit_wait(ctx, cb, err);
+  const int rc = avm_gpu_pipeline_dispatch(ctx, v->pipe, bufs, 4, &pc,
+                                           sizeof(pc), (uint32_t)n, err);
   if (rc != 0) return rc;
 
   const block_result *res = (const block_result *)v->res.mapped;

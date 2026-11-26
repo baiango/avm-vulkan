@@ -47,6 +47,7 @@ add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
 add_library(
   avm_gpu STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_gpu.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/pipeline.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_sad.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_var.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c")
@@ -75,14 +76,14 @@ endif()
 if(ENABLE_TESTS)
   add_executable(avm_gpu_sad_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_sad_test.c")
-  target_link_libraries(avm_gpu_sad_test PRIVATE avm_gpu avm)
+  target_link_libraries(avm_gpu_sad_test PRIVATE avm)
   add_test(NAME avm_gpu_sad_test COMMAND avm_gpu_sad_test)
   # 77 = "no Vulkan device", so machines without a GPU skip instead of failing.
   set_tests_properties(avm_gpu_sad_test PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(avm_gpu_var_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_var_test.c")
-  target_link_libraries(avm_gpu_var_test PRIVATE avm_gpu avm)
+  target_link_libraries(avm_gpu_var_test PRIVATE avm)
   add_test(NAME avm_gpu_var_test COMMAND avm_gpu_var_test)
   set_tests_properties(avm_gpu_var_test PROPERTIES SKIP_RETURN_CODE 77)
 
