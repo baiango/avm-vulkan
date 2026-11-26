@@ -129,7 +129,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair |
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
-| `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, lazy device init, env-gated |
+| `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
 
@@ -181,6 +181,8 @@ Two seams, selected by `AV2_GPU_SAD`:
 | `AV2_GPU_SAD=single` | `avm_dsp/sad.c::highbd_sad()` | one block per call (debugging) |
 | `AV2_GPU_SAD=all` | both | per-call fallback plus batched groups |
 | `AV2_GPU_VAR=1` | `avm_dsp/variance.c::highbd_variance64()` | every variance/SSE block in the encoder's RD decisions |
+| `AV2_GPU_SAD_RESIDENT=0` | `avm_gpu/vulkan_hook.c` | drop source-block residency inside a search (A/B switch) |
+| `AV2_GPU_SAD_LOOKAHEAD=0` | `av2/encoder/mcomp.c` | one dispatch per search step instead of one per two steps (A/B switch, also a ctest case) |
 
 Both entries fall through to the exact CPU SAD when no device initialises, so a
 machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
@@ -194,6 +196,20 @@ AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./avmenc --limit=3 --good --cpu-used=8 \
 The variance seam covers all 4x4..256x256 variance sizes, because they all
 funnel through `highbd_variance64()`; `AV2_GPU_VAR_STATS=1` prints the block
 count.
+
+### Search lookahead
+
+Each search step prices its candidates in one batch, and every other step also
+prices the *next* step's sites around every position that step could elect
+(the current centre plus each valid candidate), in the same dispatch. The
+winner of a step is one of those centres, so the following step's candidate
+list is already priced and needs no dispatch at all - the search costs one
+dispatch per two steps instead of two. Speculative positions never change a
+decision, they are only extra SADs, so the search trajectory is untouched.
+The lookahead is limited to blocks of at most 32x32 samples, where the extra
+packing is far cheaper than a dispatch; larger blocks keep one dispatch per
+step. `AV2_GPU_SAD_LOOKAHEAD=0` restores the previous shape and is covered by
+`avm_gpu_encoder_parity_no_lookahead`.
 
 Buffer placement used by both seams:
 
@@ -221,7 +237,9 @@ Measured on Apple M4 via MoltenVK, 64x64, 3 frames, `--cpu-used=8 --threads=1`:
 | `AV2_GPU_SAD=1` (4-candidate groups) | 712,996 | 178,249 | 73.9 s | md5 `cd833e6f...` |
 | same + `AVM_GPU_PACK16=1` | 712,996 | 178,249 | 35.7 s | md5 `cd833e6f...` |
 | whole-step batching + packed storage | 714,775 | 80,895 | 17.7 s | md5 `cd833e6f...` |
-| same, plus `AV2_GPU_ARENA=1` (device-local) | 714,775 | 80,895 | 543 s (3 encodes) | md5 `cd833e6f...` |
+| + source residency (`AV2_GPU_SAD=1`, `AVM_GPU_PACK16=1`) | 714,775 | 80,895 | 17.0 s | md5 `cd833e6f...` |
+| + search lookahead (one dispatch per two steps) | 2,674,812 | 51,403 | **12.3 s** | md5 `cd833e6f...` |
+| + search lookahead, `AV2_GPU_ARENA=1` | 2,674,812 | 51,403 | 12.8 s | md5 `cd833e6f...` |
 
 Batching, the reusable expansion scratch and packed storage took the GPU encode
 from 440.5 s to 35.7 s (12.3x) with the same bitstream. It is still ~19x slower
@@ -233,8 +251,12 @@ the block is re-packed per call. The remaining fixes are structural, not micro:
    (8.8 blocks/dispatch, 80,895 dispatches, 17.7 s vs 35.7 s). Note that
    validity is now decided per candidate instead of per group; on the gate clip
    the bitstream is unchanged.
-2. Keep the **source and reference frames resident** for the duration of a
-   block's search instead of re-packing planes per call.
+2. ~~Keep the source block resident for the duration of a search.~~ Done:
+   `avm_gpu_hook_sad_scope_begin()/end()` wrap one diamond search, inside which
+   the source block is immutable, so the hook uploads it once and re-uploads
+   only the candidate reference blocks (59,025 of 80,895 source uploads skipped
+   on the gate clip). A scope is what makes the pointer identity meaningful:
+   nothing stays resident across scopes.
 3. ~~Add a device-local arena.~~ Done (`AV2_GPU_ARENA=1`, gated by
    `avm_gpu_sad_test_arena` / `avm_gpu_var_test_arena`): it is correct but a
    loss on unified memory; the next win is to keep the planes resident across
@@ -294,6 +316,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] CCSO block pass + parity gate (1008 cases)
 - [x] encoder call sites (batched SAD and variance) with a byte-identical
       bitstream gate
+- [x] source-block residency per search and one-step search lookahead
+      (80,895 -> 51,403 dispatches, 18.1 s -> 12.3 s, same md5)
 - [x] device-local arena + staging copies, opt-in, gated for SAD and variance
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 

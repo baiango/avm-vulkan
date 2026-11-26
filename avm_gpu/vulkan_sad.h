@@ -50,6 +50,18 @@ int avm_gpu_sad_set_planes(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
  * cost[n] receives the per-block SAD, bit-identical to the C reference.
  * Returns 0 on success, -1 with err filled in otherwise.
  */
+/*
+ * Split uploads, so a caller can keep one plane resident across calls (the
+ * motion-search hook keeps the source block fixed for a whole search). A run
+ * needs both planes and both must use the same upload layout.
+ */
+int avm_gpu_sad_set_src(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
+                        const uint16_t *src, int src_stride, int src_rows,
+                        char err[AVM_GPU_ERR_LEN]);
+int avm_gpu_sad_set_ref(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
+                        const uint16_t *ref, int ref_stride, int ref_rows,
+                        char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
                     const avm_gpu_sad_pos *blocks, int n, int bw, int bh,
                     uint32_t *cost, char err[AVM_GPU_ERR_LEN]);

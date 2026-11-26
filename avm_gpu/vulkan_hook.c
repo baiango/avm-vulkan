@@ -43,6 +43,11 @@ typedef struct hook_state {
   size_t pos_cap;
   unsigned long blocks;
   unsigned long dispatches;
+  /* Residency scope state: the source block held on the device. */
+  int scope;
+  const uint16_t *resident_src;
+  int resident_src_stride, resident_w, resident_h;
+  unsigned long resident_hits;
 } hook_state;
 
 static hook_state g_hook;
@@ -55,6 +60,24 @@ static void print_stats(void) {
             g_hook.blocks, g_hook.dispatches,
             g_hook.dispatches ? (double)g_hook.blocks / g_hook.dispatches : 0.0);
   }
+  if (getenv("AV2_GPU_SAD_STATS")) {
+    fprintf(stderr, "avm_gpu: %lu source uploads skipped (residency)\n",
+            g_hook.resident_hits);
+  }
+}
+
+void avm_gpu_hook_sad_scope_begin(void) {
+  pthread_mutex_lock(&g_lock);
+  g_hook.scope++;
+  g_hook.resident_src = NULL;
+  pthread_mutex_unlock(&g_lock);
+}
+
+void avm_gpu_hook_sad_scope_end(void) {
+  pthread_mutex_lock(&g_lock);
+  if (g_hook.scope > 0) g_hook.scope--;
+  if (g_hook.scope == 0) g_hook.resident_src = NULL;
+  pthread_mutex_unlock(&g_lock);
 }
 
 static int parse_mode(const char *env) {
@@ -162,9 +185,21 @@ static int hook_multi_locked(const uint16_t *src, int src_stride,
     if (!g_hook.pos_cap) return 0;
   }
 
-  for (int y = 0; y < height; y++) {
-    memcpy(g_hook.src_copy + (size_t)y * width, src + (size_t)y * src_stride,
-           (size_t)width * sizeof(uint16_t));
+  /* Inside a scope the source block is fixed, so it stays on the device. */
+  const char *res_env = getenv("AV2_GPU_SAD_RESIDENT");
+  const int residency_on = !(res_env && !strcmp(res_env, "0"));
+  const int src_resident = residency_on && g_hook.scope > 0 &&
+                           g_hook.resident_src == src &&
+                           g_hook.resident_src_stride == src_stride &&
+                           g_hook.resident_w == width &&
+                           g_hook.resident_h == height;
+  if (!src_resident) {
+    for (int y = 0; y < height; y++) {
+      memcpy(g_hook.src_copy + (size_t)y * width, src + (size_t)y * src_stride,
+             (size_t)width * sizeof(uint16_t));
+    }
+  } else {
+    g_hook.resident_hits++;
   }
   for (int i = 0; i < n; i++) {
     if (!ref_ptrs[i]) continue;
@@ -178,10 +213,20 @@ static int hook_multi_locked(const uint16_t *src, int src_stride,
   }
 
   char err[AVM_GPU_ERR_LEN];
-  if (avm_gpu_sad_set_planes(g_hook.ctx, g_hook.sad, g_hook.src_copy, width,
-                             height, g_hook.ref_copy, width, height * n,
-                             err) != 0) {
+  if (!src_resident &&
+      avm_gpu_sad_set_src(g_hook.ctx, g_hook.sad, g_hook.src_copy, width,
+                          height, err) != 0) {
     return 0;
+  }
+  if (avm_gpu_sad_set_ref(g_hook.ctx, g_hook.sad, g_hook.ref_copy, width,
+                          height * n, err) != 0) {
+    return 0;
+  }
+  if (g_hook.scope > 0) {
+    g_hook.resident_src = src;
+    g_hook.resident_src_stride = src_stride;
+    g_hook.resident_w = width;
+    g_hook.resident_h = height;
   }
   uint32_t *costs = malloc((size_t)n * sizeof(*costs));
   if (!costs) return 0;

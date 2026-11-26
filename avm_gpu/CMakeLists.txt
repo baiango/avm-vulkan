@@ -302,5 +302,16 @@ if(ENABLE_TESTS)
       COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/test/run_encoder_parity.sh"
               "$<TARGET_FILE:avmenc>")
     set_tests_properties(avm_gpu_encoder_parity PROPERTIES SKIP_RETURN_CODE 77)
+    # Same gate with the speculative search lookahead turned off, so both
+    # search shapes (one dispatch per step and one per two steps) are covered.
+    add_test(
+      NAME avm_gpu_encoder_parity_no_lookahead
+      COMMAND
+        sh "${CMAKE_CURRENT_SOURCE_DIR}/test/run_encoder_parity.sh"
+        "$<TARGET_FILE:avmenc>")
+    set_tests_properties(
+      avm_gpu_encoder_parity_no_lookahead
+      PROPERTIES SKIP_RETURN_CODE 77
+                 ENVIRONMENT "AV2_GPU_SAD_LOOKAHEAD=0")
   endif()
 endif()

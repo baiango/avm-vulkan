@@ -19,8 +19,10 @@
 extern "C" {
 #endif
 
-/* Largest candidate batch the batched entry point accepts. */
-#define AVM_GPU_HOOK_MAX_BATCH 16
+/* Largest candidate batch the batched entry point accepts. The motion search
+ * uses one batch per search step, including the speculative pricing of the
+ * next step (see av2/encoder/mcomp.c), which needs 1 + 13 * 12 slots. */
+#define AVM_GPU_HOOK_MAX_BATCH 256
 
 /*
  * Encoder integration seam for the C SAD path.
@@ -44,6 +46,19 @@ int avm_gpu_hook_sad(const uint16_t *src, int src_stride, const uint16_t *ref,
  * source block in one dispatch. Entries with a NULL reference pointer are
  * skipped and their sad[] slot is left untouched. Returns 1 when handled.
  */
+/*
+ * Residency scope. Between begin() and end() the caller promises that the
+ * source block and the reference pixels at the candidate addresses it hands to
+ * avm_gpu_hook_sad_multi() do not change, so the hook keeps the source block
+ * on the device instead of re-uploading it on every call. end() drops the
+ * cached state: nothing stays resident across scopes, so a scope is the only
+ * thing that makes a pointer comparison meaningful. Calls outside a scope, or
+ * with a different block shape, upload as before. Both are no-ops unless the
+ * GPU path is enabled.
+ */
+void avm_gpu_hook_sad_scope_begin(void);
+void avm_gpu_hook_sad_scope_end(void);
+
 int avm_gpu_hook_sad_multi(const uint16_t *src, int src_stride,
                            const uint16_t *const *ref_ptrs, int ref_stride,
                            int width, int height, int n, unsigned int *sad);

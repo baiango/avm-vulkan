@@ -212,7 +212,7 @@ documentation. This section is the short version.
 | generic deblock (`deblock.comp`) | matches `avm_highbd_lpf_{horizontal,vertical}_generic_c()`, 378 combinations of width/threshold/flags/orientation | `avm_gpu_deblock_test` |
 | CDEF block filter (`cdef.comp`) | matches `av2_cdef_filter_16_{0,1,2,3}_c`, 5760 combinations of direction/strength/damping/shift/variant | `avm_gpu_cdef_test` |
 | CCSO block pass (`ccso.comp`) | matches `ccso_filter_block_hbd_wo_buf_c()`, 1008 combinations of support/classifier/thresholds/bands/block size | `avm_gpu_ccso_test` |
-| encoder integration (batched motion search + variance) | `avmenc` with `AV2_GPU_SAD=1` and with `AV2_GPU_VAR=1` both produce the CPU run's **md5**, and must price blocks | `avm_gpu_encoder_parity` |
+| encoder integration (batched motion search + variance) | `avmenc` with `AV2_GPU_SAD=1` and with `AV2_GPU_VAR=1` both produce the CPU run's **md5**, and must price blocks; the same gate also runs with the search lookahead disabled | `avm_gpu_encoder_parity`, `avm_gpu_encoder_parity_no_lookahead` |
 
 Both gates compare **every block** against the reference on random planes with
 random strides and candidate positions — no tolerance, no PSNR fallback. A
@@ -281,7 +281,7 @@ the integration gate encodes a 3-frame 64×64 clip:
 |---|---:|---|
 | CPU SAD | 1.86 s | md5 `cd833e6f...` |
 | `AV2_GPU_SAD=single`, one dispatch per call | 440.5 s | md5 `cd833e6f...` |
-| `AV2_GPU_SAD=1`, whole-step batching (80,895 dispatches, 8.8 blocks/dispatch) | 17.7 s | md5 `cd833e6f...` |
+| `AV2_GPU_SAD=1`, whole-step batching + residency + search lookahead (51,403 dispatches, 52 blocks/dispatch) | **12.3 s** | md5 `cd833e6f...` |
 | same + `AVM_GPU_PACK16=1` (packed 16-bit storage) | 35.7 s | md5 `cd833e6f...` |
 
 Batching plus packed 16-bit storage bought 12.3x, but the GPU path is still

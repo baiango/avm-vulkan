@@ -13,6 +13,8 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "config/avm_config.h"
 #include "config/avm_dsp_rtcd.h"
@@ -38,6 +40,10 @@
 
 #if defined(AVM_GPU_HOOKS)
 #include "avm_gpu/vulkan_hook.h"
+#else
+/* The batched step pricing below is plain C when no GPU hook is built; it only
+ * needs the batch bound, which lives with the hook API. */
+#define AVM_GPU_HOOK_MAX_BATCH 256
 #endif
 
 static INLINE void init_ms_buffers(MSBuffers *ms_buffers, const MACROBLOCK *x) {
@@ -1708,6 +1714,54 @@ static int fast_bigdia_search(const FULLPEL_MV start_mv,
                        do_init_search, cost_list, best_mv);
 }
 
+#if defined(AVM_GPU_HOOKS)
+/* Speculative SAD cache for the batched search.
+ *
+ * Every candidate of a search is an address inside the reference frame, and
+ * the reference pixels (and the source block) do not change while one
+ * diamond_search_sad() call runs, so the address is a sound key for that call.
+ * The motion search under a Vulkan hook uses it to price the *next* step's
+ * sites in the same batch as the current one: the winner of a step is the
+ * current centre or one of its candidates, so sites around all of them cover
+ * every position the next step can ask for, and that step then needs no
+ * dispatch at all.
+ */
+#define GPU_SAD_CACHE_SIZE 256
+
+static int gpu_sad_lookup(const intptr_t *keys, const unsigned int *sads,
+                          intptr_t key, unsigned int *sad) {
+  if (!key) return 0;
+  const int h = (int)(((uintptr_t)key >> 1) % GPU_SAD_CACHE_SIZE);
+  for (int probe = 0; probe < GPU_SAD_CACHE_SIZE; probe++) {
+    const int i = (h + probe) % GPU_SAD_CACHE_SIZE;
+    if (keys[i] == key) {
+      *sad = sads[i];
+      return 1;
+    }
+    if (!keys[i]) return 0;
+  }
+  return 0;
+}
+
+static void gpu_sad_insert(intptr_t *keys, unsigned int *sads, intptr_t key,
+                           unsigned int sad) {
+  if (!key) return;
+  const int h = (int)(((uintptr_t)key >> 1) % GPU_SAD_CACHE_SIZE);
+  for (int probe = 0; probe < GPU_SAD_CACHE_SIZE; probe++) {
+    const int i = (h + probe) % GPU_SAD_CACHE_SIZE;
+    if (keys[i] == key) {
+      sads[i] = sad;
+      return;
+    }
+    if (!keys[i]) {
+      keys[i] = key;
+      sads[i] = sad;
+      return;
+    }
+  }
+}
+#endif  // AVM_GPU_HOOKS
+
 static int diamond_search_sad(FULLPEL_MV start_mv,
                               const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
                               const int search_step, int *num00,
@@ -1746,6 +1800,13 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
   *num00 = 0;
   *best_mv = start_mv;
 
+#if defined(AVM_GPU_HOOKS)
+  // One scope per search: the source block is the same for every candidate
+  // priced below, so the Vulkan hook keeps it resident instead of re-uploading
+  // it on each step (see avm_gpu/vulkan_hook.h).
+  avm_gpu_hook_sad_scope_begin();
+#endif
+
   // Check the starting position
 
   if (ms_params->is_intra_mode && ms_params->cm->features.allow_local_intrabc) {
@@ -1767,6 +1828,23 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
     bestsad = get_mvpred_compound_sad(ms_params, src, best_address, ref_stride);
     bestsad += mvsad_err_cost(*best_mv, &ms_params->mv_cost_params);
   }
+
+#if defined(AVM_GPU_HOOKS)
+  /* Lookahead state, see gpu_sad_lookup() above. AV2_GPU_SAD_LOOKAHEAD=0
+   * turns the speculative pricing off (the gate uses it to A/B the search). */
+  const char *la_env = getenv("AV2_GPU_SAD_LOOKAHEAD");
+  const int lookahead_on = !(la_env && !strcmp(la_env, "0"));
+  const int la_area = (int)block_size_wide[ms_params->bsize] *
+                      (int)block_size_high[ms_params->bsize];
+  /* Only every other step spends slots on lookahead, otherwise a step whose
+   * own candidates were all cached would immediately dispatch again for the
+   * step after it. */
+  const int la_parity = (tot_steps - 1) & 1;
+  intptr_t la_keys[GPU_SAD_CACHE_SIZE];
+  unsigned int la_sads[GPU_SAD_CACHE_SIZE];
+  int gpu_seen = 0; /* the hook priced at least one batch in this search */
+  memset(la_keys, 0, sizeof(la_keys));
+#endif
 
   int next_step_size = tot_steps > 2 ? cfg->radius[tot_steps - 2] : 1;
   for (int step = tot_steps - 1; step >= 0; --step) {
@@ -1802,6 +1880,8 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
     if (all_in && !mask && !second_pred) {
       const uint16_t *src_buf = src->buf;
       const int src_stride = src->stride;
+      const int bw = block_size_wide[ms_params->bsize];
+      const int bh = block_size_high[ms_params->bsize];
       /* Price the whole search step in one go: the candidates are
        * independent (same centre, same block size), so a single batched
        * dispatch replaces the 4-candidate groups of sdx4df. */
@@ -1813,13 +1893,19 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
 
       for (j = 0; j < n_cand; j++) {
         const int idx = j + 1;
-        int valid = 1;
-        if (ms_params->is_intra_mode &&
+        const FULLPEL_MV this_mv = {
+          best_mv->row + (site[idx].mv.row * prec_multiplier),
+          best_mv->col + (site[idx].mv.col * prec_multiplier)
+        };
+        /* Same acceptance rule as the scalar loop below, so a batched step
+         * prices exactly the positions the CPU path would. */
+        int valid = av2_is_fullmv_in_range(&ms_params->mv_limits, this_mv,
+                                           ms_params->mv_cost_params
+                                               .pb_mv_precision);
+        if (valid && ms_params->is_intra_mode &&
             ms_params->cm->features.allow_local_intrabc) {
-          MV sub_mv = { (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
-                            best_mv->row + site[idx].mv.row),
-                        (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(
-                            best_mv->col + site[idx].mv.col) };
+          MV sub_mv = { (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(this_mv.row),
+                        (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(this_mv.col) };
           valid = av2_is_dv_valid(sub_mv, ms_params->cm, ms_params->xd,
                                   ms_params->mi_row, ms_params->mi_col,
                                   ms_params->bsize, ms_params->mib_size_log2);
@@ -1835,20 +1921,124 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
         }
       }
 
-      int gpu_handled = 0;
+      /* One queue for the batch: the step's candidates plus, every other
+       * step, the next step's sites around every possible winner. Entries
+       * already in the cache cost nothing. */
+      uint16_t const *price_off[AVM_GPU_HOOK_MAX_BATCH];
+      intptr_t price_key[AVM_GPU_HOOK_MAX_BATCH];
+      unsigned int price_sad[AVM_GPU_HOOK_MAX_BATCH];
+      int price_slot[AVM_GPU_HOOK_MAX_BATCH]; /* j, or -1 for lookahead */
+      int n_price = 0;
+      int n_cached = 0;
+
+      for (j = 0; j < n_cand; j++) {
+        if (!cand_ok[j]) continue;
 #if defined(AVM_GPU_HOOKS)
-      gpu_handled = avm_gpu_hook_sad_multi(
-          src_buf, src_stride, (const uint16_t *const *)cand_off, ref_stride,
-          block_size_wide[ms_params->bsize],
-          block_size_high[ms_params->bsize], n_cand, cand_sad);
+        unsigned int cached = 0;
+        if (gpu_seen && lookahead_on &&
+            gpu_sad_lookup(la_keys, la_sads, (intptr_t)cand_off[j], &cached)) {
+          cand_sad[j] = cached;
+          n_cached++;
+          continue;
+        }
 #endif
-      if (!gpu_handled) {
-        for (j = 0; j < n_cand; j++) {
-          if (!cand_ok[j]) continue;
-          cand_sad[j] =
-              ms_params->sdf(src_buf, src_stride, cand_off[j], ref_stride);
+        price_off[n_price] = cand_off[j];
+        price_key[n_price] = (intptr_t)cand_off[j];
+        price_slot[n_price] = j;
+        n_price++;
+      }
+
+#if defined(AVM_GPU_HOOKS)
+      const int la_wanted = lookahead_on && step > 0 && la_area <= 1024 &&
+                            (step & 1) == la_parity &&
+                            n_price < AVM_GPU_HOOK_MAX_BATCH;
+      if (la_wanted) {
+        const search_site *nsite = cfg->site[step - 1];
+        const int n_next = cfg->searches_per_step[step - 1];
+        for (int c = 0; c <= n_cand && n_price < AVM_GPU_HOOK_MAX_BATCH; c++) {
+          if (c > 0 && !cand_ok[c - 1]) continue;
+          const int crow = c == 0 ? 0 : site[c].mv.row * prec_multiplier;
+          const int ccol = c == 0 ? 0 : site[c].mv.col * prec_multiplier;
+          for (int k = 1;
+               k <= n_next && n_price < AVM_GPU_HOOK_MAX_BATCH; k++) {
+            const int row = crow + nsite[k].mv.row * prec_multiplier;
+            const int col = ccol + nsite[k].mv.col * prec_multiplier;
+            const FULLPEL_MV this_mv = { best_mv->row + row,
+                                         best_mv->col + col };
+            if (!av2_is_fullmv_in_range(&ms_params->mv_limits, this_mv,
+                                        ms_params->mv_cost_params
+                                            .pb_mv_precision)) {
+              continue;
+            }
+            if (ms_params->is_intra_mode &&
+                ms_params->cm->features.allow_local_intrabc) {
+              MV sub_mv = { (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(this_mv.row),
+                            (MV_COMP_DATA_TYPE)GET_MV_SUBPEL(this_mv.col) };
+              if (!av2_is_dv_valid(sub_mv, ms_params->cm, ms_params->xd,
+                                   ms_params->mi_row, ms_params->mi_col,
+                                   ms_params->bsize,
+                                   ms_params->mib_size_log2)) {
+                continue;
+              }
+            }
+            const uint16_t *const off = (row * ref_stride + col) + best_address;
+            unsigned int cached = 0;
+            if (gpu_sad_lookup(la_keys, la_sads, (intptr_t)off, &cached)) {
+              continue;
+            }
+            int dup = 0;
+            for (int q = 0; q < n_price; q++) {
+              if (price_key[q] == (intptr_t)off) {
+                dup = 1;
+                break;
+              }
+            }
+            if (dup) continue;
+            price_off[n_price] = off;
+            price_key[n_price] = (intptr_t)off;
+            price_slot[n_price] = -1;
+            n_price++;
+          }
         }
       }
+#endif
+
+      int gpu_handled = 0;
+#if defined(AVM_GPU_HOOKS)
+      if (n_price > 0) {
+        gpu_handled = avm_gpu_hook_sad_multi(
+            src_buf, src_stride, (const uint16_t *const *)price_off,
+            ref_stride, bw, bh, n_price, price_sad);
+      } else {
+        /* Every candidate came from the speculative cache. */
+        gpu_handled = gpu_seen;
+      }
+      gpu_seen = gpu_handled;
+#endif
+      if (!gpu_handled) {
+        /* CPU fallback: price the candidates only, the speculative entries
+         * are never looked up once the hook is out of the picture. */
+        for (j = 0; j < n_price; j++) {
+          if (price_slot[j] < 0) continue;
+          price_sad[j] = ms_params->sdf(src_buf, src_stride, price_off[j],
+                                        ref_stride);
+        }
+      }
+
+      for (j = 0; j < n_price; j++) {
+        if (price_slot[j] < 0) {
+#if defined(AVM_GPU_HOOKS)
+          if (gpu_handled) {
+            gpu_sad_insert(la_keys, la_sads, price_key[j], price_sad[j]);
+          }
+#endif
+        } else {
+          cand_sad[price_slot[j]] = price_sad[j];
+        }
+      }
+      (void)n_cached;
+      (void)bw;
+      (void)bh;
 
       for (j = 0; j < n_cand; j++) {
         if (!cand_ok[j]) continue;
@@ -1931,6 +2121,10 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
       }
     }
   }
+
+#if defined(AVM_GPU_HOOKS)
+  avm_gpu_hook_sad_scope_end();
+#endif
 
   return bestsad;
 }

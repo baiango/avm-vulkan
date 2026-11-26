@@ -27,10 +27,8 @@ struct avm_gpu_sad {
   avm_gpu_pipeline *pipe;
   avm_gpu_buf src, ref, pos, cost;
   VkDeviceSize src_cap, ref_cap, pos_cap, cost_cap;
-  uint32_t *widen; /* scratch for the M0 u16 -> u32 expansion */
-  size_t widen_cap;
   int src_stride, ref_stride;
-  int packed; /* M1: two samples per word, no expansion on upload */
+  int src_packed, ref_packed; /* M1: two samples per word, no expansion */
   avm_gpu_arena *arena; /* device-local arena (AV2_GPU_ARENA=1) */
 };
 
@@ -87,25 +85,75 @@ void avm_gpu_sad_destroy(avm_gpu_ctx *ctx, avm_gpu_sad *sad) {
   avm_gpu_buf_destroy(ctx, &sad->pos);
   avm_gpu_buf_destroy(ctx, &sad->cost);
   avm_gpu_arena_destroy(ctx, sad->arena);
-  free(sad->widen);
   free(sad);
 }
 
-/* M0 uploads one 16-bit sample per 32-bit word; see avm_gpu/README.md.
- * The expansion buffer is reused across calls: motion search calls this
- * millions of times per encode. */
-static int widen_into(avm_gpu_sad *sad, const uint16_t *src, size_t src_n,
-                      const uint16_t *ref, size_t ref_n) {
-  if (src_n + ref_n > sad->widen_cap) {
-    free(sad->widen);
-    sad->widen = malloc((src_n + ref_n) * sizeof(*sad->widen));
-    sad->widen_cap = sad->widen ? src_n + ref_n : 0;
-    if (!sad->widen) return -1;
+/* M0 uploads one 16-bit sample per 32-bit word; see avm_gpu/README.md. */
+static uint32_t *widen(const uint16_t *plane, int stride, int rows) {
+  if (!plane || stride <= 0 || rows <= 0) return NULL;
+  const size_t n = (size_t)stride * (size_t)rows;
+  uint32_t *w = malloc(n * sizeof(*w));
+  if (!w) return NULL;
+  for (size_t i = 0; i < n; i++) w[i] = plane[i];
+  return w;
+}
+
+/* M1 packed layout needs an even stride so a row maps onto whole words. */
+static int packed_for(int stride) {
+  const char *env = getenv("AVM_GPU_PACK16");
+  return env && *env && *env != '0' && (stride % 2) == 0;
+}
+
+static int upload_plane(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
+                        const uint16_t *plane, int stride, int rows,
+                        avm_gpu_buf *buf, VkDeviceSize *cap, int *buf_packed,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (!plane || stride <= 0 || rows <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid plane");
+    return -1;
   }
-  uint32_t *sw = sad->widen;
-  uint32_t *rw = sad->widen + src_n;
-  for (size_t i = 0; i < src_n; i++) sw[i] = src[i];
-  for (size_t i = 0; i < ref_n; i++) rw[i] = ref[i];
+  const int packed = packed_for(stride);
+  const size_t n = (size_t)stride * (size_t)rows;
+  const VkDeviceSize bytes = (VkDeviceSize)(packed ? n * 2 : n * 4);
+  if (avm_gpu_slot_reserve(ctx, sad->arena, buf, cap, bytes, err) != 0) {
+    return -1;
+  }
+  int rc;
+  if (packed) {
+    /* Two adjacent 16-bit samples already are one little-endian word. */
+    rc = avm_gpu_slot_upload(ctx, sad->arena, buf, plane, bytes, err);
+  } else {
+    uint32_t *w = widen(plane, stride, rows);
+    if (!w) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+    rc = avm_gpu_slot_upload(ctx, sad->arena, buf, w, bytes, err);
+    free(w);
+  }
+  if (rc == 0) *buf_packed = packed;
+  return rc;
+}
+
+int avm_gpu_sad_set_src(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
+                        const uint16_t *src, int src_stride, int src_rows,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (upload_plane(ctx, sad, src, src_stride, src_rows, &sad->src,
+                   &sad->src_cap, &sad->src_packed, err) != 0) {
+    return -1;
+  }
+  sad->src_stride = src_stride;
+  return 0;
+}
+
+int avm_gpu_sad_set_ref(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
+                        const uint16_t *ref, int ref_stride, int ref_rows,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (upload_plane(ctx, sad, ref, ref_stride, ref_rows, &sad->ref,
+                   &sad->ref_cap, &sad->ref_packed, err) != 0) {
+    return -1;
+  }
+  sad->ref_stride = ref_stride;
   return 0;
 }
 
@@ -113,47 +161,10 @@ int avm_gpu_sad_set_planes(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
                            const uint16_t *src, int src_stride, int src_rows,
                            const uint16_t *ref, int ref_stride, int ref_rows,
                            char err[AVM_GPU_ERR_LEN]) {
-  if (!src || !ref || src_stride <= 0 || ref_stride <= 0 || src_rows <= 0 ||
-      ref_rows <= 0) {
-    snprintf(err, AVM_GPU_ERR_LEN, "invalid planes");
+  if (avm_gpu_sad_set_src(ctx, sad, src, src_stride, src_rows, err) != 0) {
     return -1;
   }
-  const size_t src_n = (size_t)src_stride * (size_t)src_rows;
-  const size_t ref_n = (size_t)ref_stride * (size_t)ref_rows;
-
-  /* M1 packed layout needs even strides so a row maps onto whole words. */
-  const char *pack_env = getenv("AVM_GPU_PACK16");
-  sad->packed = pack_env && *pack_env && *pack_env != '0' &&
-                (src_stride % 2) == 0 && (ref_stride % 2) == 0;
-
-  const VkDeviceSize src_bytes =
-      sad->packed ? (VkDeviceSize)(src_n * 2) : (VkDeviceSize)(src_n * 4);
-  const VkDeviceSize ref_bytes =
-      sad->packed ? (VkDeviceSize)(ref_n * 2) : (VkDeviceSize)(ref_n * 4);
-  if (avm_gpu_slot_reserve(ctx, sad->arena, &sad->src, &sad->src_cap, src_bytes,
-                           err) ||
-      avm_gpu_slot_reserve(ctx, sad->arena, &sad->ref, &sad->ref_cap, ref_bytes,
-                           err)) {
-    return -1;
-  }
-  const void *src_up = src;
-  const void *ref_up = ref;
-  if (!sad->packed) {
-    if (widen_into(sad, src, src_n, ref, ref_n) != 0) {
-      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
-      return -1;
-    }
-    src_up = sad->widen;
-    ref_up = sad->widen + src_n;
-  }
-  /* Packed: two adjacent 16-bit samples already are one little-endian word. */
-  if (avm_gpu_slot_upload(ctx, sad->arena, &sad->src, src_up, src_bytes, err) ||
-      avm_gpu_slot_upload(ctx, sad->arena, &sad->ref, ref_up, ref_bytes, err)) {
-    return -1;
-  }
-  sad->src_stride = src_stride;
-  sad->ref_stride = ref_stride;
-  return 0;
+  return avm_gpu_sad_set_ref(ctx, sad, ref, ref_stride, ref_rows, err);
 }
 
 int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
@@ -162,6 +173,10 @@ int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
   if (n <= 0) return 0;
   if (sad->src_stride <= 0 || sad->ref_stride <= 0) {
     snprintf(err, AVM_GPU_ERR_LEN, "planes not set");
+    return -1;
+  }
+  if (sad->src_packed != sad->ref_packed) {
+    snprintf(err, AVM_GPU_ERR_LEN, "mixed upload layouts");
     return -1;
   }
   const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
@@ -180,7 +195,7 @@ int avm_gpu_sad_run(avm_gpu_ctx *ctx, avm_gpu_sad *sad,
   const avm_gpu_buf bufs[4] = { sad->src, sad->ref, sad->pos, sad->cost };
   push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
                         (uint32_t)sad->src_stride, (uint32_t)sad->ref_stride,
-                        (uint32_t)n,    (uint32_t)sad->packed };
+                        (uint32_t)n,    (uint32_t)sad->src_packed };
   int rc = avm_gpu_pipeline_dispatch(ctx, sad->pipe, bufs, 4, &pc,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc == 0) {
