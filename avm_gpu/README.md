@@ -137,9 +137,11 @@ and throughput is not claimed — this milestone is about correctness.
 - **Two layouts, one kernel.** With `AVM_GPU_PACK16=1` planes are uploaded as
   **two little-endian 16-bit samples per 32-bit word** (M1): the host `memcpy`s
   the plane straight into the SSBO and the shader unpacks. Without it the M0
-  layout (one sample per word) is used. Both layouts are gated by the same
-  parity tests, and the packed one halves buffer size and upload bytes.
-  Packed mode requires even strides; odd strides fall back to the M0 layout.
+  layout (one sample per word) is used. SAD, variance/SSE and the forward DCT
+  all support it; `avm_gpu_var_test_packed` and `avm_gpu_txfm_test_packed`
+  gate the packed path in ctest, and the encoder parity gate passes with
+  `AVM_GPU_PACK16=1` exported. Packed mode requires even strides; odd strides
+  fall back to the M0 layout.
 - Buffers are host-visible and coherent: planes are uploaded by `memcpy` and
   results read back after the fence. M1 stages through device-local memory with
   a copy queue and a persistent arena (the same shape as the VRAM arena in the

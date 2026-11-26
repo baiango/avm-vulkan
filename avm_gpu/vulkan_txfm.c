@@ -32,10 +32,11 @@ struct avm_gpu_txfm {
   size_t expand_cap;
   int have_src;
   int stride;
+  int packed;
 };
 
 typedef struct push_constants {
-  uint32_t stride, size, count, pad;
+  uint32_t stride, size, count, packed;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -83,6 +84,18 @@ int avm_gpu_txfm_set_source(avm_gpu_ctx *ctx, avm_gpu_txfm *t,
     return -1;
   }
   const size_t n = (size_t)stride * (size_t)rows;
+  const char *pack_env = getenv("AVM_GPU_PACK16");
+  t->packed = pack_env && *pack_env && *pack_env != '0' && (stride % 2) == 0;
+  if (t->packed) {
+    /* Two signed 16-bit samples per word, exactly as they sit in memory. */
+    if (ensure_buf(ctx, &t->src, &t->src_cap, (VkDeviceSize)n * 2, err)) {
+      return -1;
+    }
+    memcpy(t->src.mapped, src, n * 2);
+    t->stride = stride;
+    t->have_src = 1;
+    return 0;
+  }
   if (n > t->expand_cap) {
     free(t->expand);
     t->expand = malloc(n * sizeof(*t->expand));
@@ -126,7 +139,8 @@ int avm_gpu_txfm_fdct(avm_gpu_ctx *ctx, avm_gpu_txfm *t,
   /* One invocation per block; the pipeline dispatches whole workgroups, so
    * round up and let the shader discard the tail. */
   const avm_gpu_buf bufs[3] = { t->src, t->pos, t->out };
-  push_constants pc = { (uint32_t)t->stride, (uint32_t)size, (uint32_t)n, 0 };
+  push_constants pc = { (uint32_t)t->stride, (uint32_t)size, (uint32_t)n,
+                        (uint32_t)t->packed };
   const uint32_t groups = (uint32_t)((n + TXFM_WORKGROUP - 1) / TXFM_WORKGROUP);
   const int rc =
       avm_gpu_pipeline_dispatch(ctx, t->pipe, bufs, 3, &pc, sizeof(pc), groups,

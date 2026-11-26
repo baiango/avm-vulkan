@@ -226,12 +226,21 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_var_test PRIVATE avm)
   add_test(NAME avm_gpu_var_test COMMAND avm_gpu_var_test)
   set_tests_properties(avm_gpu_var_test PROPERTIES SKIP_RETURN_CODE 77)
+  # Same gate with the packed 16-bit upload layout.
+  add_test(NAME avm_gpu_var_test_packed COMMAND avm_gpu_var_test)
+  set_tests_properties(
+    avm_gpu_var_test_packed
+    PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AVM_GPU_PACK16=1")
 
   add_executable(avm_gpu_txfm_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_txfm_test.c")
   target_link_libraries(avm_gpu_txfm_test PRIVATE avm)
   add_test(NAME avm_gpu_txfm_test COMMAND avm_gpu_txfm_test)
   set_tests_properties(avm_gpu_txfm_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME avm_gpu_txfm_test_packed COMMAND avm_gpu_txfm_test)
+  set_tests_properties(
+    avm_gpu_txfm_test_packed
+    PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AVM_GPU_PACK16=1")
 
   add_executable(avm_gpu_intra_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_intra_test.c")

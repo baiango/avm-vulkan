@@ -20,9 +20,20 @@ layout(push_constant) uniform PC {
   uint src_stride;
   uint ref_stride;
   uint count;
+  uint packed;  // 1 = two 16-bit samples per word
 } pc;
 
 shared uint s_lo[256];
+
+uint smp(uint i) {
+  if (pc.packed == 0u) return s[i];
+  return (s[i >> 1u] >> ((i & 1u) * 16u)) & 0xffffu;
+}
+
+uint rmp(uint i) {
+  if (pc.packed == 0u) return r[i];
+  return (r[i >> 1u] >> ((i & 1u) * 16u)) & 0xffffu;
+}
 shared uint s_hi[256];
 shared int s_sum[256];
 
@@ -51,7 +62,7 @@ void main() {
       const uint so = p.x + y * pc.src_stride;
       const uint ro = p.y + y * pc.ref_stride;
       for (uint x = 0u; x < pc.bw; ++x) {
-        const int d = int(s[so + x]) - int(r[ro + x]);
+        const int d = int(smp(so + x)) - int(rmp(ro + x));
         sum += d;
         add_u32(lo, hi, uint(d * d));
       }

@@ -27,10 +27,11 @@ struct avm_gpu_var {
   avm_gpu_buf src, ref, pos, res;
   VkDeviceSize src_cap, ref_cap, pos_cap, res_cap;
   int src_stride, ref_stride;
+  int packed;
 };
 
 typedef struct push_constants {
-  uint32_t bw, bh, src_stride, ref_stride, count;
+  uint32_t bw, bh, src_stride, ref_stride, count, packed;
 } push_constants;
 
 /* Shader output: (sse_hi, sse_lo, sum, 0). */
@@ -88,6 +89,31 @@ int avm_gpu_var_set_planes(avm_gpu_ctx *ctx, avm_gpu_var *v,
                            const uint16_t *src, int src_stride, int src_rows,
                            const uint16_t *ref, int ref_stride, int ref_rows,
                            char err[AVM_GPU_ERR_LEN]) {
+  /* M1 packed layout needs even strides so a row maps onto whole words. */
+  const char *pack_env = getenv("AVM_GPU_PACK16");
+  v->packed = pack_env && *pack_env && *pack_env != '0' &&
+              (src_stride % 2) == 0 && (ref_stride % 2) == 0;
+
+  const size_t src_n = (size_t)src_stride * (size_t)src_rows;
+  const size_t ref_n = (size_t)ref_stride * (size_t)ref_rows;
+  const VkDeviceSize src_bytes =
+      v->packed ? (VkDeviceSize)(src_n * 2) : (VkDeviceSize)(src_n * 4);
+  const VkDeviceSize ref_bytes =
+      v->packed ? (VkDeviceSize)(ref_n * 2) : (VkDeviceSize)(ref_n * 4);
+
+  if (v->packed) {
+    if (ensure_buf(ctx, &v->src, &v->src_cap, src_bytes, err) ||
+        ensure_buf(ctx, &v->ref, &v->ref_cap, ref_bytes, err)) {
+      return -1;
+    }
+    /* Two adjacent 16-bit samples already are one little-endian word. */
+    memcpy(v->src.mapped, src, (size_t)src_bytes);
+    memcpy(v->ref.mapped, ref, (size_t)ref_bytes);
+    v->src_stride = src_stride;
+    v->ref_stride = ref_stride;
+    return 0;
+  }
+
   uint32_t *sw = widen(src, src_stride, src_rows);
   uint32_t *rw = widen(ref, ref_stride, ref_rows);
   if (!sw || !rw) {
@@ -96,8 +122,6 @@ int avm_gpu_var_set_planes(avm_gpu_ctx *ctx, avm_gpu_var *v,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  const VkDeviceSize src_bytes = (VkDeviceSize)src_stride * src_rows * 4;
-  const VkDeviceSize ref_bytes = (VkDeviceSize)ref_stride * ref_rows * 4;
   if (ensure_buf(ctx, &v->src, &v->src_cap, src_bytes, err) ||
       ensure_buf(ctx, &v->ref, &v->ref_cap, ref_bytes, err)) {
     free(sw);
@@ -144,8 +168,9 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
   memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
 
   const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
-  push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)v->src_stride,
-                        (uint32_t)v->ref_stride, (uint32_t)n };
+  push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
+                        (uint32_t)v->src_stride, (uint32_t)v->ref_stride,
+                        (uint32_t)n,    (uint32_t)v->packed };
   const int rc = avm_gpu_pipeline_dispatch(ctx, v->pipe, bufs, 4, &pc,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc != 0) return rc;
@@ -185,8 +210,9 @@ int avm_gpu_var_run_raw(avm_gpu_ctx *ctx, avm_gpu_var *v,
   memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
 
   const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
-  push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)v->src_stride,
-                        (uint32_t)v->ref_stride, (uint32_t)n };
+  push_constants pc = { (uint32_t)bw,   (uint32_t)bh,
+                        (uint32_t)v->src_stride, (uint32_t)v->ref_stride,
+                        (uint32_t)n,    (uint32_t)v->packed };
   const int rc = avm_gpu_pipeline_dispatch(ctx, v->pipe, bufs, 4, &pc,
                                            sizeof(pc), (uint32_t)n, err);
   if (rc != 0) return rc;
