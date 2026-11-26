@@ -76,6 +76,29 @@ if [ "$calls" -le "$dispatches" ]; then
   exit 1
 fi
 
+# Second call site: the variance/SSE kernel feeding partition and mode RD.
+if ! AV2_GPU_VAR=1 AV2_GPU_VAR_STATS=1 "$AVMENC" $ARGS -o "$work/var.ivf" \
+    "$work/clip.y4m" >"$work/var.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/txfm.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU variance encode failed"
+  tail -20 "$work/var.log"
+  exit 1
+fi
+if ! grep -q "variance hook enabled" "$work/var.log"; then
+  echo "FAIL: the Vulkan variance hook did not initialise"
+  tail -20 "$work/var.log"
+  exit 1
+fi
+tcalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) variance blocks.*/\1/p' "$work/var.log")
+if [ -z "$tcalls" ] || [ "$tcalls" -le 0 ]; then
+  echo "FAIL: the GPU variance path priced no blocks"
+  tail -20 "$work/var.log"
+  exit 1
+fi
+
 hash_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | cut -d' ' -f1
@@ -93,9 +116,16 @@ echo "gpu SAD blocks : $calls in $dispatches dispatches"
 echo "cpu bitstream  : $cpu_size bytes, md5 $cpu_hash"
 echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
+var_hash=$(hash_of "$work/var.ivf")
+echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"
+
 if [ "$cpu_hash" != "$gpu_hash" ]; then
-  echo "FAIL: bitstreams differ"
+  echo "FAIL: SAD bitstreams differ"
+  exit 1
+fi
+if [ "$cpu_hash" != "$var_hash" ]; then
+  echo "FAIL: variance bitstreams differ"
   exit 1
 fi
 
-echo "PASS: bit-identical bitstream with and without the Vulkan SAD path"
+echo "PASS: bit-identical bitstream with the Vulkan SAD path and with the Vulkan variance path"

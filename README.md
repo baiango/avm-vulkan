@@ -212,7 +212,7 @@ documentation. This section is the short version.
 | generic deblock (`deblock.comp`) | matches `avm_highbd_lpf_{horizontal,vertical}_generic_c()`, 378 combinations of width/threshold/flags/orientation | `avm_gpu_deblock_test` |
 | CDEF block filter (`cdef.comp`) | matches `av2_cdef_filter_16_{0,1,2,3}_c`, 5760 combinations of direction/strength/damping/shift/variant | `avm_gpu_cdef_test` |
 | CCSO block pass (`ccso.comp`) | matches `ccso_filter_block_hbd_wo_buf_c()`, 1008 combinations of support/classifier/thresholds/bands/block size | `avm_gpu_ccso_test` |
-| encoder integration (`vulkan_hook.c`, batched motion search) | `avmenc` with `AV2_GPU_SAD=1` produces a bitstream with the **same md5** as the CPU run and must price >1 block per dispatch | `avm_gpu_encoder_parity` |
+| encoder integration (batched motion search + variance) | `avmenc` with `AV2_GPU_SAD=1` and with `AV2_GPU_VAR=1` both produce the CPU run's **md5**, and must price blocks | `avm_gpu_encoder_parity` |
 
 Both gates compare **every block** against the reference on random planes with
 random strides and candidate positions — no tolerance, no PSNR fallback. A

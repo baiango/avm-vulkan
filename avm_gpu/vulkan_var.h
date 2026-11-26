@@ -48,6 +48,15 @@ int avm_gpu_var_set_planes(avm_gpu_ctx *ctx, avm_gpu_var *var,
  *
  * Planes must have been set with avm_gpu_var_set_planes().
  */
+/*
+ * Raw accumulator form used by the encoder hook: returns the unscaled 64-bit
+ * SSE and the signed pixel-difference sum, before any bitdepth rounding.
+ */
+int avm_gpu_var_run_raw(avm_gpu_ctx *ctx, avm_gpu_var *var,
+                        const avm_gpu_var_pos *blocks, int n, int bw, int bh,
+                        uint64_t *sse_out, int64_t *sum_out,
+                        char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *var,
                     const avm_gpu_var_pos *blocks, int n, int bw, int bh,
                     int bitdepth, uint32_t *variance_out, uint32_t *sse_out,

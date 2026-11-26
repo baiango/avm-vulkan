@@ -26,7 +26,7 @@ extern "C" {
  * Encoder integration seam for the C SAD path.
  *
  * Called from avm_dsp/sad.c::highbd_sad() when the library is built with
- * AVM_GPU_SAD_HOOK. Returns 1 and writes *sad when the Vulkan path priced the
+ * AVM_GPU_HOOKS. Returns 1 and writes *sad when the Vulkan path priced the
  * block, 0 when the caller must use the CPU path.
  *
  * Disabled unless the environment variable AV2_GPU_SAD is set to 1, so a

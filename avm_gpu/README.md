@@ -159,12 +159,12 @@ and throughput is not claimed — this milestone is about correctness.
 
 Two seams, selected by `AV2_GPU_SAD`:
 
-| value | path | shape |
+| env | seam | shape |
 |---|---|---|
-| unset / `0` | CPU only | the hook is never initialised |
-| `1` / `batch` | batched | `av2/encoder/mcomp.c` prices each 4-candidate group of the diamond search in one dispatch |
-| `single` | per-call | `avm_dsp/sad.c::highbd_sad()` dispatches one block per call (debugging) |
-| `all` | both | per-call fallback plus batched groups |
+| `AV2_GPU_SAD=1` (or `batch`) | `av2/encoder/mcomp.c` diamond search | each 4-candidate group in one dispatch |
+| `AV2_GPU_SAD=single` | `avm_dsp/sad.c::highbd_sad()` | one block per call (debugging) |
+| `AV2_GPU_SAD=all` | both | per-call fallback plus batched groups |
+| `AV2_GPU_VAR=1` | `avm_dsp/variance.c::highbd_variance64()` | every variance/SSE block in the encoder's RD decisions |
 
 Both entries fall through to the exact CPU SAD when no device initialises, so a
 machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
@@ -174,6 +174,10 @@ dispatches at exit.
 AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./avmenc --limit=3 --good --cpu-used=8 \
     --threads=1 -o out.ivf clip.y4m
 ```
+
+The variance seam covers all 4x4..256x256 variance sizes, because they all
+funnel through `highbd_variance64()`; `AV2_GPU_VAR_STATS=1` prints the block
+count.
 
 ### End-to-end gate
 
@@ -256,7 +260,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
 - [x] CCSO block pass + parity gate (1008 cases)
-- [x] encoder call site with byte-identical bitstream gate
+- [x] encoder call sites (batched SAD and variance) with a byte-identical
+      bitstream gate
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
 ## Not done (M1/M2)

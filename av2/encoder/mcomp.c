@@ -36,7 +36,7 @@
 
 #include "avm_dsp/binary_codes_writer.h"
 
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
 #include "avm_gpu/vulkan_hook.h"
 #endif
 
@@ -1316,7 +1316,7 @@ static void calc_sad_batch_prices(const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
   const struct buf_2d *const ref = ms_params->ms_buffers.ref;
   const search_site *site = ms_params->search_sites->site[search_step];
   int handled = 0;
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
   const uint16_t *ref_ptrs[AVM_GPU_HOOK_MAX_BATCH];
   int valid = 0;
 #endif
@@ -1325,7 +1325,7 @@ static void calc_sad_batch_prices(const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
     mvs[i].row = temp_best_mv->row + site[cand_start + i].mv.row;
     mvs[i].col = temp_best_mv->col + site[cand_start + i].mv.col;
     sads[i] = UINT_MAX;
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
     ref_ptrs[i] = NULL;
     if (av2_is_fullmv_in_range(&ms_params->mv_limits, mvs[i],
                                ms_params->mv_cost_params.pb_mv_precision)) {
@@ -1335,7 +1335,7 @@ static void calc_sad_batch_prices(const FULLPEL_MOTION_SEARCH_PARAMS *ms_params,
 #endif
   }
 
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
   if (valid > 0) {
     const BLOCK_SIZE bsize = ms_params->bsize;
     handled = avm_gpu_hook_sad_multi(src->buf, src->stride, ref_ptrs,
@@ -1828,7 +1828,7 @@ static int diamond_search_sad(FULLPEL_MV start_mv,
         }
 
         int gpu_handled = 0;
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
         gpu_handled = avm_gpu_hook_sad_multi(
             src_buf, src_stride, (const uint16_t *const *)block_offset,
             ref_stride, block_size_wide[ms_params->bsize],

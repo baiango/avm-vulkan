@@ -15,6 +15,10 @@
 
 #include "config/avm_config.h"
 #include "config/avm_dsp_rtcd.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_var.h"
+#endif
 #include "config/av2_rtcd.h"
 
 #include "avm/avm_integer.h"
@@ -100,6 +104,13 @@ void avm_var_filter_block2d_bil_second_pass_c(const uint16_t *a, uint8_t *b,
 static void highbd_variance64(const uint16_t *a, int a_stride,
                               const uint16_t *b, int b_stride, int w, int h,
                               uint64_t *sse, int64_t *sum) {
+#if defined(AVM_GPU_HOOKS)
+  // Optional Vulkan path (avm_gpu/). Returns 0 and falls through to the CPU
+  // loop unless AV2_GPU_VAR=1 and a compute device is available.
+  if (avm_gpu_hook_variance64(a, a_stride, b, b_stride, w, h, sse, sum)) {
+    return;
+  }
+#endif
   int64_t tsum = 0;
   uint64_t tsse = 0;
   for (int i = 0; i < h; ++i) {

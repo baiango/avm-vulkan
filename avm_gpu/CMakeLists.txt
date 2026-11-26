@@ -174,7 +174,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_deblock.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_cdef.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_ccso.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_var.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
@@ -205,7 +206,7 @@ add_dependencies(avm_gpu avm_gpu_shaders)
 foreach (avm_gpu_hook_target avm_dsp_common avm_dsp_encoder avm_av2_common
                              avm_av2_encoder avm_av2_decoder)
   if(TARGET ${avm_gpu_hook_target})
-    target_compile_definitions(${avm_gpu_hook_target} PRIVATE AVM_GPU_SAD_HOOK=1)
+    target_compile_definitions(${avm_gpu_hook_target} PRIVATE AVM_GPU_HOOKS=1)
   endif()
 endforeach()
 if(TARGET avm)

@@ -19,14 +19,14 @@
 #include "avm_ports/mem.h"
 #include "avm_dsp/blend.h"
 
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
 #include "avm_gpu/vulkan_hook.h"
 #endif
 
 static INLINE unsigned int highbd_sad(const uint16_t *a, int a_stride,
                                       const uint16_t *b, int b_stride,
                                       int width, int height) {
-#if defined(AVM_GPU_SAD_HOOK)
+#if defined(AVM_GPU_HOOKS)
   // Optional Vulkan path (avm_gpu/). Returns 0 and falls through to the CPU
   // unless AV2_GPU_SAD=1 and a compute device is available, so a default run
   // is unchanged.

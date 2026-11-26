@@ -166,3 +166,37 @@ int avm_gpu_var_run(avm_gpu_ctx *ctx, avm_gpu_var *v,
   }
   return 0;
 }
+
+int avm_gpu_var_run_raw(avm_gpu_ctx *ctx, avm_gpu_var *v,
+                        const avm_gpu_var_pos *blocks, int n, int bw, int bh,
+                        uint64_t *sse_out, int64_t *sum_out,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (n <= 0) return 0;
+  if (v->src_stride <= 0 || v->ref_stride <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "planes not set");
+    return -1;
+  }
+  const VkDeviceSize pos_bytes = (VkDeviceSize)n * sizeof(*blocks);
+  const VkDeviceSize res_bytes = (VkDeviceSize)n * sizeof(block_result);
+  if (ensure_buf(ctx, &v->pos, &v->pos_cap, pos_bytes, err) ||
+      ensure_buf(ctx, &v->res, &v->res_cap, res_bytes, err)) {
+    return -1;
+  }
+  memcpy(v->pos.mapped, blocks, (size_t)pos_bytes);
+
+  const avm_gpu_buf bufs[4] = { v->src, v->ref, v->pos, v->res };
+  push_constants pc = { (uint32_t)bw, (uint32_t)bh, (uint32_t)v->src_stride,
+                        (uint32_t)v->ref_stride, (uint32_t)n };
+  const int rc = avm_gpu_pipeline_dispatch(ctx, v->pipe, bufs, 4, &pc,
+                                           sizeof(pc), (uint32_t)n, err);
+  if (rc != 0) return rc;
+
+  const block_result *res = (const block_result *)v->res.mapped;
+  for (int i = 0; i < n; i++) {
+    if (sse_out) {
+      sse_out[i] = ((uint64_t)res[i].sse_hi << 32) | res[i].sse_lo;
+    }
+    if (sum_out) sum_out[i] = (int32_t)res[i].sum;
+  }
+  return 0;
+}
