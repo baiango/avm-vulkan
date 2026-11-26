@@ -1,0 +1,137 @@
+#version 450
+// Inverse DCT (AV2 4x4 and 8x8, DCT_DCT) with reconstruction add.
+//
+// Mirrors av2/common/idct.c inv_txfm_c() for the TX_4X4 / TX_8X8 DCT_DCT case:
+// clamp_buf to bd + 8 bits, the same inv_tx_shift pair (7/10 and 7/11), the
+// same transpose-per-pass layout and the same clamp ranges (bd + 8 for the
+// first pass, bd for the second). The kernel matrices are small (|v| <= 89),
+// so with coefficients clamped to bd + 8 bits every product fits in 32 bits.
+// The result is added to the prediction with highbd_clip_pixel_add semantics.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Coef { int c[]; };
+layout(std430, binding = 1) readonly buffer Pos { uvec2 pos[]; };
+layout(std430, binding = 2) buffer Dst { uint d[]; };
+
+layout(push_constant) uniform PC {
+  uint size_;  // 4 or 8
+  uint bd;
+  uint stride;
+  uint count;
+  uint shift1;
+  uint shift2;
+  uint pad0;
+  uint pad1;
+} pc;
+
+const int M4[4][4] = { { 64, 64, 64, 64 },
+                       { 83, 35, -35, -83 },
+                       { 64, -64, -64, 64 },
+                       { 35, -83, 83, -35 } };
+
+const int M8[8][8] = {
+  { 64, 64, 64, 64, 64, 64, 64, 64 },
+  { 89, 75, 50, 18, -18, -50, -75, -89 },
+  { 83, 35, -35, -83, -83, -35, 35, 83 },
+  { 75, -18, -89, -50, 50, 89, 18, -75 },
+  { 64, -64, -64, 64, 64, -64, -64, 64 },
+  { 50, -89, 18, 75, -75, -18, 89, -50 },
+  { 35, -83, 83, -35, -35, 83, -83, 35 },
+  { 18, -50, 75, -89, 89, -75, 50, -18 }
+};
+
+int clampv(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void dct4(int src[4], out int dst[4], int shift, int lo, int hi) {
+  const int add = 1 << (shift - 1);
+  const int b0 = M4[1][0] * src[1] + M4[3][0] * src[3];
+  const int b1 = M4[1][1] * src[1] + M4[3][1] * src[3];
+  const int a0 = M4[0][0] * src[0] + M4[2][0] * src[2];
+  const int a1 = M4[0][1] * src[0] + M4[2][1] * src[2];
+  dst[0] = clampv((a0 + b0 + add) >> shift, lo, hi);
+  dst[1] = clampv((a1 + b1 + add) >> shift, lo, hi);
+  dst[2] = clampv((a1 - b1 + add) >> shift, lo, hi);
+  dst[3] = clampv((a0 - b0 + add) >> shift, lo, hi);
+}
+
+void dct8(int src[8], out int dst[8], int shift, int lo, int hi) {
+  const int add = 1 << (shift - 1);
+  int b[4], dd[2], cc[2], a[4];
+  for (int k = 0; k < 4; ++k) {
+    b[k] = M8[1][k] * src[1] + M8[3][k] * src[3] + M8[5][k] * src[5] +
+           M8[7][k] * src[7];
+  }
+  dd[0] = M8[2][0] * src[2] + M8[6][0] * src[6];
+  dd[1] = M8[2][1] * src[2] + M8[6][1] * src[6];
+  cc[0] = M8[0][0] * src[0] + M8[4][0] * src[4];
+  cc[1] = M8[0][1] * src[0] + M8[4][1] * src[4];
+  a[0] = cc[0] + dd[0];
+  a[3] = cc[0] - dd[0];
+  a[1] = cc[1] + dd[1];
+  a[2] = cc[1] - dd[1];
+  for (int k = 0; k < 4; ++k) {
+    dst[k] = clampv((a[k] + b[k] + add) >> shift, lo, hi);
+    dst[k + 4] = clampv((a[3 - k] - b[3 - k] + add) >> shift, lo, hi);
+  }
+}
+
+void main() {
+  const uint b = gl_GlobalInvocationID.x;
+  if (b >= pc.count) return;
+
+  const int size_ = int(pc.size_);
+  const int bd = int(pc.bd);
+  const int shift1 = int(pc.shift1);
+  const int shift2 = int(pc.shift2);
+  const int mid = 1 << (bd + 7);
+  const int colmax = 1 << bd;
+  const uint src_off = pos[b].x;
+  const uint dst_off = pos[b].y;
+
+  int block[64];
+  int tmp[64];
+
+  // clamp_buf to bd + 8 bits
+  for (int i = 0; i < size_ * size_; ++i) {
+    block[i] = clampv(c[src_off + uint(i)], -mid, mid - 1);
+  }
+
+  // Pass 1: lines of size_, transposed into tmp.
+  if (size_ == 4) {
+    for (int j = 0; j < 4; ++j) {
+      int s[4], o[4];
+      for (int k = 0; k < 4; ++k) s[k] = block[j * 4 + k];
+      dct4(s, o, shift1, -mid, mid - 1);
+      for (int k = 0; k < 4; ++k) tmp[k * 4 + j] = o[k];
+    }
+    for (int j = 0; j < 4; ++j) {
+      int s[4], o[4];
+      for (int k = 0; k < 4; ++k) s[k] = tmp[j * 4 + k];
+      dct4(s, o, shift2, -colmax, colmax - 1);
+      for (int k = 0; k < 4; ++k) block[k * 4 + j] = o[k];
+    }
+  } else {
+    for (int j = 0; j < 8; ++j) {
+      int s[8], o[8];
+      for (int k = 0; k < 8; ++k) s[k] = block[j * 8 + k];
+      dct8(s, o, shift1, -mid, mid - 1);
+      for (int k = 0; k < 8; ++k) tmp[k * 8 + j] = o[k];
+    }
+    for (int j = 0; j < 8; ++j) {
+      int s[8], o[8];
+      for (int k = 0; k < 8; ++k) s[k] = tmp[j * 8 + k];
+      dct8(s, o, shift2, -colmax, colmax - 1);
+      for (int k = 0; k < 8; ++k) block[k * 8 + j] = o[k];
+    }
+  }
+
+  const int maxv = (1 << bd) - 1;
+  for (int y = 0; y < size_; ++y) {
+    for (int x = 0; x < size_; ++x) {
+      const uint idx = dst_off + uint(y) * pc.stride + uint(x);
+      int v = int(d[idx]) + block[y * size_ + x];
+      d[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
+    }
+  }
+}
