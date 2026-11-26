@@ -25,6 +25,7 @@ endif()
 set(AVM_GPU_SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 set(AVM_GPU_SAD_SPV "${AVM_GPU_SPV_DIR}/sad.spv")
 set(AVM_GPU_VAR_SPV "${AVM_GPU_SPV_DIR}/variance.spv")
+set(AVM_GPU_TXFM_SPV "${AVM_GPU_SPV_DIR}/txfm.spv")
 
 add_custom_command(
   OUTPUT "${AVM_GPU_SAD_SPV}"
@@ -41,8 +42,17 @@ add_custom_command(
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/variance.comp"
   COMMENT "avm_gpu: variance.comp -> variance.spv"
   VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_TXFM_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/txfm.comp" -o
+          "${AVM_GPU_TXFM_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/txfm.comp"
+  COMMENT "avm_gpu: txfm.comp -> txfm.spv"
+  VERBATIM)
 add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
-                                          "${AVM_GPU_VAR_SPV}")
+                                          "${AVM_GPU_VAR_SPV}"
+                                          "${AVM_GPU_TXFM_SPV}")
 
 add_library(
   avm_gpu STATIC
@@ -50,11 +60,13 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/pipeline.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_sad.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_var.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_txfm.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
-                                   AVM_GPU_VAR_SPV_PATH="${AVM_GPU_VAR_SPV}")
+                                   AVM_GPU_VAR_SPV_PATH="${AVM_GPU_VAR_SPV}"
+                                   AVM_GPU_TXFM_SPV_PATH="${AVM_GPU_TXFM_SPV}")
 # Vulkan structs are initialised by sType; the remaining fields are required
 # to be zero, so the missing-field diagnostic is noise here.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -89,6 +101,12 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_var_test PRIVATE avm)
   add_test(NAME avm_gpu_var_test COMMAND avm_gpu_var_test)
   set_tests_properties(avm_gpu_var_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  add_executable(avm_gpu_txfm_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_txfm_test.c")
+  target_link_libraries(avm_gpu_txfm_test PRIVATE avm)
+  add_test(NAME avm_gpu_txfm_test COMMAND avm_gpu_txfm_test)
+  set_tests_properties(avm_gpu_txfm_test PROPERTIES SKIP_RETURN_CODE 77)
 
   # End-to-end: encode the same clip with the CPU and the Vulkan SAD path and
   # require identical bitstreams.

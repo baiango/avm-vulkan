@@ -1,8 +1,8 @@
 # avm_gpu — Vulkan compute backend for AVM
 
-Status: **M0 complete.** Two kernels (`highbd SAD`, `highbd variance/SSE`),
-three gates, and an encoder call site that produces **byte-identical
-bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
+Status: **M0 complete, kernels growing.** Three kernels (`highbd SAD`,
+`highbd variance/SSE`, forward DCT 4x4/8x8), four gates, and an encoder call
+site that produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
 
@@ -19,6 +19,10 @@ and throughput is not claimed — this milestone is about correctness.
   through the batched hook in motion search (one dispatch per 4-candidate
   group) and produces a bitstream identical to the CPU run (gate:
   `test/run_encoder_parity.sh`, 713k blocks, md5 compared).
+- `avm_gpu_txfm_*` reproduces `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c`
+  bit-for-bit, including the 64-bit `tran_high_t` products, which are formed
+  with `imulExtended` because MoltenVK reports `shaderInt64 = 0` (gate:
+  `test/avm_gpu_txfm_test.c`, 4x4 and 8x8, 12-bit and small residual ranges).
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -30,10 +34,13 @@ and throughput is not claimed — this milestone is about correctness.
 | `pipeline.{h,c}` | shared SPIR-V/descriptor/push-constant/pipeline setup and dispatch for every kernel |
 | `vulkan_sad.{h,c}` | resident planes + batched SAD dispatch, pipeline and descriptor caching |
 | `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
+| `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
+| `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
 | `test/avm_gpu_var_test.c` | parity gate against `avm_highbd_{8,10,12}_variance*_c` |
+| `test/avm_gpu_txfm_test.c` | parity gate against `avm_fdct4x4_c` / `avm_highbd_fdct8x8_c` |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, lazy device init, env-gated |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
@@ -152,15 +159,18 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] Vulkan runtime in C (instance/device/queue/pool/fence, buffers, submit)
 - [x] highbd SAD kernel + parity gate (9 sizes x 128 candidates)
 - [x] variance/SSE kernel + parity gate (3 bitdepths x 9 sizes x 128 candidates)
+- [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
 - [x] encoder call site with byte-identical bitstream gate
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
-- Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1`, but
-  buffers are still host-visible and re-uploaded per call; the device-local
-  arena is still to do.
+- Data model: packed 16-bit storage exists behind `AVM_GPU_PACK16=1` (SAD
+  only); variance and transform still widen to 32-bit words. Buffers are
+  host-visible and re-uploaded per call; the device-local arena is still to do.
+- Kernel families still missing: intra prediction, inverse transforms, inter
+  (MC/compound/warp), and the loop filters (deblock/CDEF/CCSO/restoration).
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not
