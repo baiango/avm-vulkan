@@ -35,6 +35,16 @@ void avm_gpu_itxfm_destroy(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm);
  * (stride x rows samples, 16-bit) and is updated in place, bit-identically to
  * inv_txfm_c() from av2/common/idct.c for the same TXFM_PARAM.
  */
+/*
+ * Same with an explicit transform matrix (row = input frequency, column =
+ * output index), i.e. tx_kernel_dct2_sizeN[INV_TXFM][0]. Required for sizes
+ * 16 and 32; NULL selects the built-in 4x4/8x8 tables.
+ */
+int avm_gpu_itxfm_add_m(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
+                        const int32_t *coeffs, const uint32_t *dst_off, int n,
+                        int size, int bd, const int *matrix, uint16_t *dest,
+                        int stride, int rows, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_itxfm_add(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
                       const int32_t *coeffs, const uint32_t *dst_off, int n,
                       int size, int bd, uint16_t *dest, int stride, int rows,

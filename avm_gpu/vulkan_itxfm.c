@@ -22,11 +22,11 @@
 #define AVM_GPU_ITXFM_SPV_PATH "itxfm.spv"
 #endif
 
-#define ITXFM_WORKGROUP 64
+#define ITXFM_WORKGROUP 32
 
 struct avm_gpu_itxfm {
   avm_gpu_pipeline *pipe;
-  avm_gpu_buf coef, pos, dst;
+  avm_gpu_buf coef, pos, dst, mat;
   VkDeviceSize coef_cap, pos_cap, dst_cap;
   uint32_t *plane;
   size_t plane_cap;
@@ -58,7 +58,7 @@ int avm_gpu_itxfm_create(avm_gpu_ctx *ctx, avm_gpu_itxfm **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_ITXFM_SPV_PATH, "AVM_GPU_ITXFM_SPV",
-                              3, sizeof(push_constants), &it->pipe,
+                              4, sizeof(push_constants), &it->pipe,
                               err) != 0) {
     free(it);
     return -1;
@@ -73,16 +73,27 @@ void avm_gpu_itxfm_destroy(avm_gpu_ctx *ctx, avm_gpu_itxfm *it) {
   avm_gpu_buf_destroy(ctx, &it->coef);
   avm_gpu_buf_destroy(ctx, &it->pos);
   avm_gpu_buf_destroy(ctx, &it->dst);
+  avm_gpu_buf_destroy(ctx, &it->mat);
   free(it->plane);
   free(it);
 }
 
-int avm_gpu_itxfm_add(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
-                      const int32_t *coeffs, const uint32_t *dst_off, int n,
-                      int size, int bd, uint16_t *dest, int stride, int rows,
-                      char err[AVM_GPU_ERR_LEN]) {
+/* tx_kernel_dct2_size4/8[INV_TXFM][0], used when the caller passes NULL. */
+static const int kMat4[16] = { 64, 64, 64, 64,   83, 35, -35, -83,
+                               64, -64, -64, 64,  35, -83, 83, -35 };
+static const int kMat8[64] = {
+  64, 64, 64, 64, 64, 64, 64, 64,   89, 75, 50, 18, -18, -50, -75, -89,
+  83, 35, -35, -83, -83, -35, 35, 83, 75, -18, -89, -50, 50, 89, 18, -75,
+  64, -64, -64, 64, 64, -64, -64, 64, 50, -89, 18, 75, -75, -18, 89, -50,
+  35, -83, 83, -35, -35, 83, -83, 35, 18, -50, 75, -89, 89, -75, 50, -18
+};
+
+int avm_gpu_itxfm_add_m(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
+                        const int32_t *coeffs, const uint32_t *dst_off, int n,
+                        int size, int bd, const int *matrix, uint16_t *dest,
+                        int stride, int rows, char err[AVM_GPU_ERR_LEN]) {
   if (n <= 0) return 0;
-  if (size != 4 && size != 8) {
+  if (size != 4 && size != 8 && size != 16 && size != 32) {
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported transform size %d", size);
     return -1;
   }
@@ -129,21 +140,42 @@ int avm_gpu_itxfm_add(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
   memcpy(it->dst.mapped, it->plane, (size_t)dst_bytes);
   free(pos);
 
-  const avm_gpu_buf bufs[3] = { it->coef, it->pos, it->dst };
+  const int *mat = matrix;
+  if (!mat) mat = size == 4 ? kMat4 : (size == 8 ? kMat8 : NULL);
+  if (!mat) {
+    snprintf(err, AVM_GPU_ERR_LEN, "a matrix is required for size %d", size);
+    return -1;
+  }
+  const VkDeviceSize mat_bytes = (VkDeviceSize)size * size * 4;
+  if (it->mat.size < mat_bytes) {
+    avm_gpu_buf_destroy(ctx, &it->mat);
+    if (avm_gpu_buf_create(ctx, mat_bytes, &it->mat, err) != 0) return -1;
+  }
+  memcpy(it->mat.mapped, mat, (size_t)mat_bytes);
+
+  const avm_gpu_buf bufs[4] = { it->coef, it->pos, it->dst, it->mat };
   push_constants pc = { (uint32_t)size,
                         (uint32_t)bd,
                         (uint32_t)stride,
                         (uint32_t)n,
-                        size == 4 ? 7u : 7u,
-                        size == 4 ? 10u : 11u,
+                        size <= 8 ? 7u : 6u,
+                        size == 4 ? 10u : (size == 8 ? 11u : 13u),
                         0,
                         0 };
   const uint32_t groups = (uint32_t)((n + ITXFM_WORKGROUP - 1) / ITXFM_WORKGROUP);
-  rc = avm_gpu_pipeline_dispatch(ctx, it->pipe, bufs, 3, &pc, sizeof(pc),
+  rc = avm_gpu_pipeline_dispatch(ctx, it->pipe, bufs, 4, &pc, sizeof(pc),
                                  groups, err);
   if (rc != 0) return rc;
 
   const uint32_t *res = it->dst.mapped;
   for (size_t i = 0; i < pixels; i++) dest[i] = (uint16_t)res[i];
   return 0;
+}
+
+int avm_gpu_itxfm_add(avm_gpu_ctx *ctx, avm_gpu_itxfm *it,
+                      const int32_t *coeffs, const uint32_t *dst_off, int n,
+                      int size, int bd, uint16_t *dest, int stride, int rows,
+                      char err[AVM_GPU_ERR_LEN]) {
+  return avm_gpu_itxfm_add_m(ctx, it, coeffs, dst_off, n, size, bd, NULL, dest,
+                             stride, rows, err);
 }

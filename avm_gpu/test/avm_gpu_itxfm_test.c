@@ -27,6 +27,9 @@
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_itxfm.h"
 
+extern const int tx_kernel_dct2_size16[4][16][16];
+extern const int tx_kernel_dct2_size32[4][32][32];
+
 #define W 128
 #define H 128
 #define STRIDE 128
@@ -66,10 +69,11 @@ static int check_size(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int size,
    * order, so a later block that covers the same pixels depends on the
    * earlier one, which a single parallel dispatch cannot reproduce. */
   const int gx = W / size, gy = H / size;
+  const int blocks = BLOCKS < gx * gy ? BLOCKS : gx * gy;
   int *slots = malloc((size_t)gx * gy * sizeof(*slots));
   if (!slots) return -1;
   for (int i = 0; i < gx * gy; i++) slots[i] = i;
-  for (int i = 0; i < BLOCKS; i++) {
+  for (int i = 0; i < blocks; i++) {
     const int pick = i + (int)(rnd() % (unsigned)(gx * gy - i));
     const int tmp = slots[i];
     slots[i] = slots[pick];
@@ -84,7 +88,10 @@ static int check_size(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int size,
 
   TxfmParam param;
   memset(&param, 0, sizeof(param));
-  param.tx_size = size == 4 ? TX_4X4 : TX_8X8;
+  param.tx_size = size == 4    ? TX_4X4
+                  : size == 8  ? TX_8X8
+                  : size == 16 ? TX_16X16
+                               : TX_32X32;
   param.primary_tx_type = DCT_DCT;
   param.bd = BD;
   param.eob = n;
@@ -92,15 +99,19 @@ static int check_size(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int size,
   param.use_ddt = 0;
   param.is_inter = 0;
 
+  const int *matrix = size == 16   ? &tx_kernel_dct2_size16[0][0][0]
+                     : size == 32 ? &tx_kernel_dct2_size32[0][0][0]
+                                  : NULL;
+
   const double t0 = now_ms();
-  for (int i = 0; i < BLOCKS; i++) {
+  for (int i = 0; i < blocks; i++) {
     inv_txfm_c(coeffs + (size_t)i * n, ref + pos[i], STRIDE, &param);
   }
   const double cpu_ms = now_ms() - t0;
 
   const double t1 = now_ms();
-  if (avm_gpu_itxfm_add(ctx, it, coeffs, pos, BLOCKS, size, BD, gpu, STRIDE, H,
-                        err) != 0) {
+  if (avm_gpu_itxfm_add_m(ctx, it, coeffs, pos, blocks, size, BD, matrix, gpu,
+                          STRIDE, H, err) != 0) {
     fprintf(stderr, "avm_gpu itxfm: %s\n", err);
     free(ref);
     free(gpu);
@@ -123,8 +134,8 @@ static int check_size(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, int size,
     }
   }
   *failures += diff != 0;
-  printf("%-6s %8d %9.3f %9.3f %s\n", size == 4 ? "4x4" : "8x8", BLOCKS, cpu_ms,
-         gpu_ms, diff ? "MISMATCH" : "ok");
+  printf("%dx%-4d %8d %9.3f %9.3f %s\n", size, size, blocks, cpu_ms, gpu_ms,
+         diff ? "MISMATCH" : "ok");
 
   free(slots);
   free(ref);
@@ -154,6 +165,8 @@ int main(void) {
   int failures = 0;
   if (check_size(ctx, it, 4, &failures) != 0) return 1;
   if (check_size(ctx, it, 8, &failures) != 0) return 1;
+  if (check_size(ctx, it, 16, &failures) != 0) return 1;
+  if (check_size(ctx, it, 32, &failures) != 0) return 1;
 
   avm_gpu_itxfm_destroy(ctx, it);
   avm_gpu_ctx_destroy(ctx);

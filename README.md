@@ -206,7 +206,7 @@ documentation. This section is the short version.
 | forward DCT 4x4 / 8x8 (`txfm.comp`) | matches `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c` bit-for-bit (64-bit products emulated) | `avm_gpu_txfm_test` |
 | intra DC/V/H/DC_LEFT/DC_TOP/DC_128/SMOOTH/SMOOTH_V/SMOOTH_H/PAETH (`intra.comp`) | matches `avm_highbd_*_predictor_*_c`, 10 modes × 4x4…64x64, plus availability rule and clamped edges | `avm_gpu_intra_test` |
 | directional intra zones 1-3 (`intra_dir.comp`) | matches `av2_highbd_dr_prediction_z{1,2,3}_c`, 6 angle configs × 5 sizes × mrl 0-2 | `avm_gpu_intra_test` |
-| inverse DCT 4x4 / 8x8 + recon add (`itxfm.comp`) | matches `inv_txfm_c()` (TX_4X4/TX_8X8, DCT_DCT), 64 blocks per size | `avm_gpu_itxfm_test` |
+| inverse DCT 4x4 / 8x8 / 16x16 / 32x32 + recon add (`itxfm.comp`) | matches `inv_txfm_c()` (DCT_DCT) for all four sizes, non-overlapping blocks | `avm_gpu_itxfm_test` |
 | inter 8-tap subpel (`inter.comp`) | matches `avm_highbd_convolve8_c()`, 6 subpel positions × 5 block sizes, whole-pel included | `avm_gpu_inter_test` |
 | generic deblock (`deblock.comp`) | matches `avm_highbd_lpf_{horizontal,vertical}_generic_c()`, 378 combinations of width/threshold/flags/orientation | `avm_gpu_deblock_test` |
 | CDEF block filter (`cdef.comp`) | matches `av2_cdef_filter_16_{0,1,2,3}_c`, 5760 combinations of direction/strength/damping/shift/variant | `avm_gpu_cdef_test` |
