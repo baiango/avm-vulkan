@@ -48,7 +48,8 @@ add_library(
   avm_gpu STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_gpu.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_sad.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_var.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_var.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
@@ -60,6 +61,16 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 target_link_libraries(avm_gpu PUBLIC Vulkan::Vulkan)
 add_dependencies(avm_gpu avm_gpu_shaders)
+
+# Encoder integration seam. avm_dsp/sad.c calls avm_gpu_hook_sad() when it is
+# built with AVM_GPU_SAD_HOOK; the hook is inert unless AV2_GPU_SAD=1, so the
+# default encode path is byte-identical.
+if(TARGET avm_dsp_common)
+  target_compile_definitions(avm_dsp_common PRIVATE AVM_GPU_SAD_HOOK=1)
+endif()
+if(TARGET avm)
+  target_link_libraries(avm PUBLIC avm_gpu)
+endif()
 
 if(ENABLE_TESTS)
   add_executable(avm_gpu_sad_test
@@ -74,4 +85,14 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_var_test PRIVATE avm_gpu avm)
   add_test(NAME avm_gpu_var_test COMMAND avm_gpu_var_test)
   set_tests_properties(avm_gpu_var_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  # End-to-end: encode the same clip with the CPU and the Vulkan SAD path and
+  # require identical bitstreams.
+  if(TARGET avmenc)
+    add_test(
+      NAME avm_gpu_encoder_parity
+      COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/test/run_encoder_parity.sh"
+              "$<TARGET_FILE:avmenc>")
+    set_tests_properties(avm_gpu_encoder_parity PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()

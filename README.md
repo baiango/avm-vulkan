@@ -199,10 +199,11 @@ documentation. This section is the short version.
 
 ### Status
 
-| Kernel | Reference it matches | Gate |
+| Check | Contract | Gate |
 |---|---|---|
-| high-bitdepth SAD (`sad.comp`) | `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64 | `avm_gpu_sad_test` |
-| variance / SSE (`variance.comp`) | `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths | `avm_gpu_var_test` |
+| high-bitdepth SAD (`sad.comp`) | matches `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64 | `avm_gpu_sad_test` |
+| variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths | `avm_gpu_var_test` |
+| encoder integration (`vulkan_hook.c`) | `avmenc` with `AV2_GPU_SAD=1` produces a bitstream with the **same md5** as the CPU run | `avm_gpu_encoder_parity` |
 
 Both gates compare **every block** against the reference on random planes with
 random strides and candidate positions — no tolerance, no PSNR fallback. A
@@ -220,8 +221,16 @@ turn the GLSL kernels into SPIR-V:
 ~~~
     $ cmake -S . -B build-vk -G Ninja \
           -DAV2_ENABLE_VULKAN=1 -DENABLE_TESTS=1 -DENABLE_EXAMPLES=0
-    $ cmake --build build-vk --target avm_gpu_sad_test avm_gpu_var_test
+    $ cmake --build build-vk --target avmenc avm_gpu_sad_test avm_gpu_var_test
     $ ctest --test-dir build-vk -R avm_gpu_
+~~~
+
+To encode through the Vulkan SAD path (off by default, CPU fallback if no
+device is found):
+
+~~~
+    $ AV2_GPU_SAD=1 AV2_GPU_SAD_STATS=1 ./build-vk/avmenc --limit=3 --good \
+          --cpu-used=8 -o out.ivf clip.y4m
 ~~~
 
 On macOS also install MoltenVK and point the loader at its ICD:
@@ -255,12 +264,13 @@ not change any kernel result.
 ### Not claimed
 
 These are **correctness** results, not speed. On an Apple M4 through MoltenVK
-the per-dispatch fence floor (~0.2–0.4 ms) dominates work this small, and the
-M4 is a quality-scoring host, not an encoder target. Entropy coding, CDF state,
-headers and rate control stay on the CPU by design. No encoder call site exists
-yet: the first integration step is routing motion-search SAD candidates through
-`avm_gpu_sad_run()` behind a runtime flag and comparing bitstreams with the CPU
-path.
+the integration gate encodes a 3-frame 64×64 clip in 440.5 s with the Vulkan
+SAD hook (1,211,438 blocks) versus 1.86 s on the CPU, with identical
+bitstreams — the hook issues one dispatch and one fence wait per SAD call,
+which is the worst possible shape for a GPU. Entropy coding, CDF state, headers
+and rate control stay on the CPU by design. Turning the port into a speed win
+needs the batched path (`avm_gpu_sad_run()` with many candidates, resident
+frames) wired into a search loop that already holds the candidate list.
 
 ## Testing
 
