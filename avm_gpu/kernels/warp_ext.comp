@@ -1,0 +1,144 @@
+#version 450
+// Extended-range affine (warped) prediction, one invocation per 4x4 chunk.
+//
+// Mirrors av2/common/warped_motion.c av2_ext_highbd_warp_affine_c() for the
+// single-prediction case: 4x4 chunks, a 6-tap av2_ext_warped_filter, the
+// 7x4 horizontal pass (offs_x from EXT_WARP_ROUND_BITS) and the 4x4 vertical
+// pass (offs_y from WARPEDDIFF_PREC_BITS), no shear parameters.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Ref { uint ref_px[]; };
+layout(std430, binding = 1) buffer Pred { uint pred_px[]; };
+layout(std430, binding = 2) readonly buffer ExtFilt { int wf[]; };
+
+layout(push_constant) uniform PC {
+  uint width;
+  uint height;
+  uint stride;
+  uint p_col;
+  uint p_row;
+  uint p_width;
+  uint p_height;
+  uint p_stride;
+  uint bd;
+  uint round_0;
+  int m0;
+  int m1;
+  int m2;
+  int m3;
+  int m4;
+  int m5;
+  uint ss_x;
+  uint ss_y;
+  uint pad0;
+  uint pad1;
+} pc;
+
+const int FILTER_BITS = 7;
+const int WARPEDMODEL_PREC_BITS = 16;
+const int WARPEDDIFF_PREC_BITS = WARPEDMODEL_PREC_BITS - 6;
+const int EXT_WARP_ROUND_BITS = WARPEDMODEL_PREC_BITS - 6;
+const int EXT_WARP_TAPS = 6;
+const int EXT_WARP_STORAGE_TAPS = 8;
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void mul64(int a, int b, out int hi, out int lo) {
+  int h, l;
+  imulExtended(a, b, h, l);
+  hi = h;
+  lo = l;
+}
+
+void add64(inout int hi, inout int lo, int ah, int al) {
+  const uint old = uint(lo);
+  uint nl = old + uint(al);
+  lo = int(nl);
+  hi = hi + ah + (nl < old ? 1 : 0);
+}
+
+void shr1(inout int hi, inout int lo) {
+  const uint ul = uint(lo);
+  lo = int((ul >> 1) | (uint(hi) << 31));
+  hi = hi >> 1;
+}
+
+void main() {
+  const int bx = int(gl_WorkGroupID.x);
+  const int by = int(gl_WorkGroupID.y);
+  const int i0 = int(pc.p_row) + by * 4;
+  const int j0 = int(pc.p_col) + bx * 4;
+
+  const int width = int(pc.width);
+  const int height = int(pc.height);
+  const int stride = int(pc.stride);
+  const int bd = int(pc.bd);
+  const int reduce_bits_horiz = int(pc.round_0);
+  const int reduce_bits_vert = 2 * FILTER_BITS - reduce_bits_horiz;
+  const int offset_bits_horiz = bd + FILTER_BITS - 1;
+  const int offset_bits_vert = bd + 2 * FILTER_BITS - reduce_bits_horiz;
+
+  const int ss_x = int(pc.ss_x);
+  const int ss_y = int(pc.ss_y);
+  const int src_x = (j0 + 2) << ss_x;
+  const int src_y = (i0 + 2) << ss_y;
+
+  int hx, lx, hy, ly, th, tl;
+  mul64(pc.m2, src_x, hx, lx);
+  mul64(pc.m3, src_y, th, tl);
+  add64(hx, lx, th, tl);
+  add64(hx, lx, pc.m0 >> 31, pc.m0);
+  mul64(pc.m4, src_x, hy, ly);
+  mul64(pc.m5, src_y, th, tl);
+  add64(hy, ly, th, tl);
+  add64(hy, ly, pc.m1 >> 31, pc.m1);
+
+  for (int i = 0; i < ss_x; ++i) shr1(hx, lx);
+  for (int i = 0; i < ss_y; ++i) shr1(hy, ly);
+
+  const int ix4 = (hx << 16) | int(uint(lx) >> 16);
+  const int sx4 = lx & 0xffff;
+  const int iy4 = (hy << 16) | int(uint(ly) >> 16);
+  const int sy4 = ly & 0xffff;
+
+  const int offs_x = (sx4 + (1 << (EXT_WARP_ROUND_BITS - 1))) >> EXT_WARP_ROUND_BITS;
+  const int offs_y = (sy4 + (1 << (WARPEDDIFF_PREC_BITS - 1))) >> WARPEDDIFF_PREC_BITS;
+
+  int im_block[9 * 4];  // (4 + EXT_WARP_TAPS - 1) rows, as in the C buffer
+
+  // Horizontal pass: k in [-4, 4], l in [-2, 1].
+  for (int k = -4; k < 5; ++k) {
+    const int iy = clampi(iy4 + k, 0, height - 1);
+    for (int l = -2; l < 2; ++l) {
+      const int ix = ix4 + l - 2;
+      int sum = 1 << offset_bits_horiz;
+      for (int m = 0; m < EXT_WARP_TAPS; ++m) {
+        const int sample_x = clampi(ix + m, 0, width - 1);
+        sum += int(ref_px[uint(iy * stride + sample_x)]) *
+               wf[offs_x * EXT_WARP_STORAGE_TAPS + m];
+      }
+      im_block[(k + 4) * 4 + (l + 2)] = (sum + (1 << (reduce_bits_horiz - 1))) >>
+                                        reduce_bits_horiz;
+    }
+  }
+
+  // Vertical pass.
+  const int k_lim = min(2, int(pc.p_row) + int(pc.p_height) - i0 - 2);
+  const int l_lim = min(2, int(pc.p_col) + int(pc.p_width) - j0 - 2);
+  const int maxv = (1 << bd) - 1;
+  for (int k = -2; k < k_lim; ++k) {
+    for (int l = -2; l < l_lim; ++l) {
+      int sum = 1 << offset_bits_vert;
+      for (int m = 0; m < EXT_WARP_TAPS; ++m) {
+        sum += im_block[(k + m + 2) * 4 + (l + 2)] *
+               wf[offs_y * EXT_WARP_STORAGE_TAPS + m];
+      }
+      sum = (sum + (1 << (reduce_bits_vert - 1))) >> reduce_bits_vert;
+      const int v = sum - (1 << (bd - 1)) - (1 << bd);
+      const uint idx = uint((i0 - int(pc.p_row) + k + 2) * int(pc.p_stride) +
+                            (j0 - int(pc.p_col) + l + 2));
+      pred_px[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
+    }
+  }
+}

@@ -31,6 +31,14 @@ void av2_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                               ConvolveParams *conv_params, int16_t alpha,
                               int16_t beta, int16_t gamma, int16_t delta);
 
+void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
+                                  int width, int height, int stride,
+                                  uint16_t *pred, int p_col, int p_row,
+                                  int p_width, int p_height, int p_stride,
+                                  int subsampling_x, int subsampling_y, int bd,
+                                  ConvolveParams *conv_params,
+                                  int use_warp_bd_box, PadBlock *warp_bd_box);
+
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_warp.h"
 
@@ -172,6 +180,45 @@ int main(void) {
               printf("  chroma mat %zu shear %zu ss %d/%d %dx%d: %d differ\n", m,
                      sh, kSub[sub][0], kSub[sub][1], pw, ph, diff);
             }
+          }
+        }
+      }
+    }
+  }
+
+  /* Extended-range warp: 4x4 chunks and the 6-tap ext filter. */
+  static const int kExtSize[4][2] = { { 4, 4 }, { 8, 8 }, { 8, 4 }, { 16, 16 } };
+  for (size_t m = 0; m < 3; m++) {
+    for (size_t sub = 0; sub < 3; sub++) {
+      for (size_t s = 0; s < 4; s++) {
+        const int pw = kExtSize[s][0];
+        const int ph = kExtSize[s][1];
+        memset(cpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+        memset(gpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+        av2_ext_highbd_warp_affine_c(kMat[m], ref, REF_W, REF_H, REF_W, cpu,
+                                     p_col, p_row, pw, ph, PRED_STRIDE,
+                                     kSub[sub][0], kSub[sub][1], BD, &cp, 0,
+                                     NULL);
+        if (avm_gpu_warp_affine_ext(ctx, warp, kMat[m], ref, REF_W, REF_H,
+                                    REF_W, gpu, p_col, p_row, pw, ph,
+                                    PRED_STRIDE, BD, cp.round_0, kSub[sub][0],
+                                    kSub[sub][1], &av2_ext_warped_filter[0][0],
+                                    err) != 0) {
+          fprintf(stderr, "avm_gpu warp ext: %s\n", err);
+          return 1;
+        }
+        int diff = 0;
+        for (int y = 0; y < REF_H; y++) {
+          for (int x = 0; x < PRED_STRIDE; x++) {
+            if (cpu[y * PRED_STRIDE + x] != gpu[y * PRED_STRIDE + x]) diff++;
+          }
+        }
+        cases++;
+        if (diff) {
+          failures++;
+          if (failures < 8) {
+            printf("  warp-ext mat %zu ss %d/%d %dx%d: %d differ\n", m,
+                   kSub[sub][0], kSub[sub][1], pw, ph, diff);
           }
         }
       }

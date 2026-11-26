@@ -22,6 +22,7 @@ extern "C" {
 #endif
 
 #define AVM_GPU_WARP_FILTER_ROWS (64 * 7 + 1)
+#define AVM_GPU_WARP_EXT_FILTER_ROWS (64 + 1)
 
 typedef struct avm_gpu_warp avm_gpu_warp;
 
@@ -43,6 +44,19 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                         int bd, int round_0, int alpha, int beta, int gamma,
                         int delta, int ss_x, int ss_y, const int16_t *filter,
                         char err[AVM_GPU_ERR_LEN]);
+
+/*
+ * Extended-range affine prediction, matching av2_ext_highbd_warp_affine_c()
+ * for the single-prediction case: 4x4 chunks and the 65-row
+ * av2_ext_warped_filter table. Blocks are multiples of 4.
+ */
+int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
+                            const int32_t mat[6], const uint16_t *ref,
+                            int width, int height, int stride, uint16_t *pred,
+                            int p_col, int p_row, int p_width, int p_height,
+                            int p_stride, int bd, int round_0, int ss_x,
+                            int ss_y, const int16_t *filter,
+                            char err[AVM_GPU_ERR_LEN]);
 
 #ifdef __cplusplus
 } /* extern "C" */
