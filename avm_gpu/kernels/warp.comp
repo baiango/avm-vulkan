@@ -2,8 +2,8 @@
 // Affine (warped) inter prediction, one invocation per 8x8 block.
 //
 // Mirrors av2/common/warped_motion.c av2_highbd_warp_affine_c() for the
-// single-prediction case (conv_params->is_compound == 0), luma
-// (subsampling_x = subsampling_y = 0):
+// single-prediction case (conv_params->is_compound == 0), including the chroma
+// projection shifts (subsampling_x / subsampling_y):
 //   - project the 8x8 block centre with the affine matrix (64-bit products
 //     emulated through imulExtended because MoltenVK has no shaderInt64),
 //   - 15x8 horizontal pass with av2_warped_filter, clamped reference reads,
@@ -36,8 +36,9 @@ layout(push_constant) uniform PC {
   int beta;
   int gamma;
   int delta;
+  uint ss_x;
+  uint ss_y;
   uint pad0;
-  uint pad1;
 } pc;
 
 const int FILTER_BITS = 7;
@@ -54,6 +55,13 @@ void mul64(int a, int b, out int hi, out int lo) {
   imulExtended(a, b, h, l);
   hi = h;
   lo = l;
+}
+
+// Arithmetic right shift of a (hi, lo) pair by one bit.
+void shr1(inout int hi, inout int lo) {
+  const uint ul = uint(lo);
+  lo = int((ul >> 1) | (uint(hi) << 31));
+  hi = hi >> 1;
 }
 
 void add64(inout int hi, inout int lo, int ah, int al) {
@@ -78,9 +86,12 @@ void main() {
   const int offset_bits_horiz = bd + FILTER_BITS - 1;
   const int offset_bits_vert = bd + 2 * FILTER_BITS - reduce_bits_horiz;
 
-  // Block centre projected through the affine matrix.
-  const int src_x = j0 + 4;
-  const int src_y = i0 + 4;
+  // Block centre projected through the affine matrix, in luma coordinates for
+  // chroma planes ((j + 4) << ss_x), then shifted back down.
+  const int ss_x = int(pc.ss_x);
+  const int ss_y = int(pc.ss_y);
+  const int src_x = (j0 + 4) << ss_x;
+  const int src_y = (i0 + 4) << ss_y;
   int hx, lx, hy, ly, th, tl;
   mul64(pc.m2, src_x, hx, lx);
   mul64(pc.m3, src_y, th, tl);
@@ -91,10 +102,20 @@ void main() {
   add64(hy, ly, th, tl);
   add64(hy, ly, pc.m1 >> 31, pc.m1);
 
-  int ix4 = (hx << 16) | int(uint(lx) >> 16);
-  int sx4 = lx & 0xffff;
-  const int iy4 = (hy << 16) | int(uint(ly) >> 16);
-  int sy4 = ly & 0xffff;
+  // (dst_x >> ss_x) >> 16 and its low 16 fractional bits.
+  int ix4, sx4, iy4, sy4;
+  {
+    int h = hx, l = lx;
+    for (int i = 0; i < ss_x; ++i) shr1(h, l);
+    ix4 = (h << 16) | int(uint(l) >> 16);
+    sx4 = l & 0xffff;
+  }
+  {
+    int h = hy, l = ly;
+    for (int i = 0; i < ss_y; ++i) shr1(h, l);
+    iy4 = (h << 16) | int(uint(l) >> 16);
+    sy4 = l & 0xffff;
+  }
 
   sx4 += pc.alpha * (-4) + pc.beta * (-4);
   sy4 += pc.gamma * (-4) + pc.delta * (-4);

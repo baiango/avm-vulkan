@@ -35,7 +35,7 @@ typedef struct push_constants {
       bd, round_0;
   int32_t m0, m1, m2, m3, m4, m5;
   int32_t alpha, beta, gamma, delta;
-  uint32_t pad0, pad1;
+  uint32_t ss_x, ss_y, pad0;
 } push_constants;
 
 int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
@@ -71,13 +71,13 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                         int height, int stride, uint16_t *pred, int p_col,
                         int p_row, int p_width, int p_height, int p_stride,
                         int bd, int round_0, int alpha, int beta, int gamma,
-                        int delta, const int16_t *filter,
+                        int delta, int ss_x, int ss_y, const int16_t *filter,
                         char err[AVM_GPU_ERR_LEN]) {
   if (!mat || !ref || !pred || !filter) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
   }
-  if (p_width <= 0 || p_height <= 0 || (p_width & 7) || (p_height & 7)) {
+  if (p_width <= 0 || p_height <= 0 || (p_width & 3) || (p_height & 3)) {
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported warp size %dx%d", p_width,
              p_height);
     return -1;
@@ -137,9 +137,10 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                         mat[4],           mat[5],
                         alpha,            beta,
                         gamma,            delta,
-                        0,                0 };
-  const uint32_t gx = (uint32_t)(p_width / 8);
-  const uint32_t gy = (uint32_t)(p_height / 8);
+                        (uint32_t)ss_x,   (uint32_t)ss_y,
+                        0 };
+  const uint32_t gx = (uint32_t)((p_width + 7) / 8);
+  const uint32_t gy = (uint32_t)((p_height + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->pipe, bufs, 3, &pc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;

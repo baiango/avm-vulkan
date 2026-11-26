@@ -31,8 +31,8 @@ void avm_gpu_warp_destroy(avm_gpu_ctx *ctx, avm_gpu_warp *warp);
 
 /*
  * Affine (warped) prediction, single-reference case, matching
- * av2_highbd_warp_affine_c() with subsampling_x = subsampling_y = 0 and
- * conv_params->is_compound == 0. mat is the 6-entry warp matrix, filter the
+ * av2_highbd_warp_affine_c() including the chroma projection shifts
+ * (ss_x / ss_y) and conv_params->is_compound == 0. mat is the 6-entry warp matrix, filter the
  * av2_warped_filter table (AVM_GPU_WARP_FILTER_ROWS x 8 int16 values).
  * pred is the whole prediction plane; only the p_col/p_row window is written.
  */
@@ -41,7 +41,7 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                         int height, int stride, uint16_t *pred, int p_col,
                         int p_row, int p_width, int p_height, int p_stride,
                         int bd, int round_0, int alpha, int beta, int gamma,
-                        int delta, const int16_t *filter,
+                        int delta, int ss_x, int ss_y, const int16_t *filter,
                         char err[AVM_GPU_ERR_LEN]);
 
 #ifdef __cplusplus

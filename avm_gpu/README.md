@@ -70,8 +70,11 @@ and throughput is not claimed — this milestone is about correctness.
 - `avm_gpu_inter_blend_a64()` matches `avm_highbd_blend_a64_mask_c()` for all
   four mask subsampling modes (gate: `test/avm_gpu_inter_test.c`).
 - `avm_gpu_warp_affine()` matches `av2_highbd_warp_affine_c()` for the
-  single-reference luma case: 3 affine matrices x 3 shear settings x 4 block
-  sizes, whole prediction plane compared (gate: `test/avm_gpu_warp_test.c`).
+  single-reference case, luma and chroma: 3 affine matrices x 3 shear settings
+  x 7 block sizes (luma 8x8..32x16, chroma 4x4..8x8) x the chroma subsampling
+  modes 420/422/440, whole prediction plane compared (gate:
+  `test/avm_gpu_warp_test.c`, 117 cases). The chroma projection shifts the
+  block centre to luma coordinates and back with a 64-bit arithmetic shift.
   MoltenVK has no `shaderInt64`, so the affine projection uses
   `imulExtended` with explicit hi/lo carry.
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
@@ -238,7 +241,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT + ADST + IDTX + FLIPADST, 4..32 + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
-- [x] inter scaled reference (steps 1..64), compound A64 blend, warp affine
+- [x] inter scaled reference (steps 1..64), compound A64 blend, warp affine (luma + chroma)
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
 - [x] CCSO block pass + parity gate (1008 cases)
@@ -252,9 +255,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: the DDT experiment types (DDTX/FDDT) and the
-  64-wide transform sizes, chroma warp (subsampled projection) and the
-  extended-range warp filter, the weighted (CWP) compound path, and loop
-  restoration. Note that AVM 1.0's
+  64-wide transform sizes, the extended-range warp filter (av2_highbd_warp_affine_ext),
+  the weighted (CWP) compound path, and loop restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
   and it needs the feature/class context; that port is a separate effort.

@@ -106,7 +106,7 @@ int main(void) {
         if (avm_gpu_warp_affine(ctx, warp, kMat[m], ref, REF_W, REF_H, REF_W,
                                 gpu, p_col, p_row, pw, ph, PRED_STRIDE, BD,
                                 cp.round_0, kShear[sh][0], kShear[sh][1],
-                                kShear[sh][2], kShear[sh][3],
+                                kShear[sh][2], kShear[sh][3], 0, 0,
                                 &av2_warped_filter[0][0], err) != 0) {
           fprintf(stderr, "avm_gpu warp: %s\n", err);
           return 1;
@@ -124,6 +124,54 @@ int main(void) {
           if (failures < 6) {
             printf("  mat %zu shear %zu %dx%d: %d samples differ\n", m, sh, pw,
                    ph, diff);
+          }
+        }
+      }
+    }
+  }
+
+  /* Chroma: the projection shifts the block centre up to luma coordinates
+   * and back down, and the blocks are 4 samples in chroma units. */
+  static const int kSub[3][2] = { { 1, 1 }, { 1, 0 }, { 0, 1 } };
+  static const int kChromaSize[3][2] = { { 4, 4 }, { 8, 8 }, { 8, 4 } };
+  for (size_t m = 0; m < 3; m++) {
+    for (size_t sh = 0; sh < 3; sh++) {
+      for (size_t sub = 0; sub < 3; sub++) {
+        for (size_t s = 0; s < 3; s++) {
+          const int pw = kChromaSize[s][0];
+          const int ph = kChromaSize[s][1];
+          memset(cpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+          memset(gpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+
+          av2_highbd_warp_affine_c(kMat[m], ref, REF_W, REF_H, REF_W, cpu,
+                                   p_col, p_row, pw, ph, PRED_STRIDE,
+                                   kSub[sub][0], kSub[sub][1], BD, &cp,
+                                   (int16_t)kShear[sh][0],
+                                   (int16_t)kShear[sh][1],
+                                   (int16_t)kShear[sh][2],
+                                   (int16_t)kShear[sh][3]);
+          if (avm_gpu_warp_affine(ctx, warp, kMat[m], ref, REF_W, REF_H, REF_W,
+                                  gpu, p_col, p_row, pw, ph, PRED_STRIDE, BD,
+                                  cp.round_0, kShear[sh][0], kShear[sh][1],
+                                  kShear[sh][2], kShear[sh][3], kSub[sub][0],
+                                  kSub[sub][1], &av2_warped_filter[0][0],
+                                  err) != 0) {
+            fprintf(stderr, "avm_gpu warp: %s\n", err);
+            return 1;
+          }
+          int diff = 0;
+          for (int y = 0; y < REF_H; y++) {
+            for (int x = 0; x < PRED_STRIDE; x++) {
+              if (cpu[y * PRED_STRIDE + x] != gpu[y * PRED_STRIDE + x]) diff++;
+            }
+          }
+          cases++;
+          if (diff) {
+            failures++;
+            if (failures < 8) {
+              printf("  chroma mat %zu shear %zu ss %d/%d %dx%d: %d differ\n", m,
+                     sh, kSub[sub][0], kSub[sub][1], pw, ph, diff);
+            }
           }
         }
       }
