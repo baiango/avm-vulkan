@@ -115,6 +115,47 @@ int main(void) {
     }
   }
 
+  /* Scaled reference prediction: the subpel step is no longer 16, so each
+   * output pixel uses its own fractional phase. */
+  static const int kSteps[5][2] = { { 16, 16 }, { 20, 16 }, { 16, 20 },
+                                    { 24, 24 }, { 32, 32 } };
+  static const int kSxTab[4] = { 3, 5, 7, 11 };
+  for (size_t st = 0; st < 5; st++) {
+    for (size_t p = 0; p < sizeof(kPos) / sizeof(kPos[0]); p++) {
+      for (size_t s = 0; s < 3; s++) {
+        const int n = kSizes[s];
+        const int sx = kSxTab[st];
+        const int sy = 4;
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+
+        avm_highbd_convolve8_c(plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE,
+                               av2_sub_pel_filters_8, kPos[p][0],
+                               kSteps[st][0], kPos[p][1], kSteps[st][1], n, n,
+                               BD);
+        if (avm_gpu_inter_convolve_scaled(
+                ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                (const int16_t *)av2_sub_pel_filters_8, kPos[p][0], kPos[p][1],
+                kSteps[st][0], kSteps[st][1], n, n, BD, gpu, DST_STRIDE,
+                err) != 0) {
+          fprintf(stderr, "avm_gpu inter scaled: %s\n", err);
+          return 1;
+        }
+
+        int diff = 0;
+        for (int y = 0; y < n; y++) {
+          for (int x = 0; x < n; x++) {
+            if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) diff++;
+          }
+        }
+        failures += diff != 0;
+        printf("scaled %2d/%2d pos(%2d,%2d) %-3d %9s %s\n", kSteps[st][0],
+               kSteps[st][1], kPos[p][0], kPos[p][1], n, "-",
+               diff ? "MISMATCH" : "ok");
+      }
+    }
+  }
+
   free(plane);
   avm_gpu_inter_destroy(ctx, inter);
   avm_gpu_ctx_destroy(ctx);

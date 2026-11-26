@@ -48,9 +48,11 @@ and throughput is not claimed — this milestone is about correctness.
   is the transform matrix itself (`tx_kernel_{dct2,adst}_sizeN[INV_TXFM][0]`),
   which is exactly what the idct.c kernels evaluate; |M| <= 90 keeps every
   product inside 32 bits.
-- `avm_gpu_inter_convolve()` matches `avm_highbd_convolve8_c()` with
-  `x_step_q4 = y_step_q4 = 16`: 6 subpel positions x 5 block sizes, whole-pel
-  included (gate: `test/avm_gpu_inter_test.c`).
+- `avm_gpu_inter_convolve_scaled()` matches `avm_highbd_convolve8_c()` for
+  any `x_step_q4` / `y_step_q4` in 1..64 - unscaled (16) and scaled reference
+  prediction - with per-pixel fractional phases: 6 subpel positions x block
+  sizes for 5 step pairs, whole-pel included (gate:
+  `test/avm_gpu_inter_test.c`, 120 cases).
 - `avm_gpu_deblock_generic()` matches `avm_highbd_lpf_{horizontal,vertical}_
   generic_c()` — filter choice plus the asymmetric delta application — over
   378 combinations of width pair, q/side thresholds, lossless flags and
@@ -79,7 +81,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4x4/8x8 with reconstruction add |
-| `vulkan_inter.{h,c}` | 8-tap subpel inter prediction (convolve8) |
+| `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
@@ -238,8 +240,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: the DDT experiment types (DDTX/FDDT) and the
-  64-wide transform sizes, compound/warp inter and scaled reference
-  prediction (x_step_q4 != 16), and loop restoration. Note that AVM 1.0's
+  64-wide transform sizes, compound (masked/multi-ref) and warp inter, and
+  loop restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,
   and it needs the feature/class context; that port is a separate effort.

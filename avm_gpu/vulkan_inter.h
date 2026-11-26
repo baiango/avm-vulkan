@@ -35,6 +35,19 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *inter);
  * must ensure the 3-sample filter border around the block is inside the plane,
  * as AVM does. filter is the 16 x 8 InterpKernel table.
  */
+/*
+ * Same with an explicit subpel step (16 = unscaled reference). Any
+ * x_step_q4 / y_step_q4 in 1..64 is supported; the source border needed by the
+ * 8-tap filter grows with the scale factor and is checked on entry.
+ */
+int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
+                                  const uint16_t *src, int src_stride,
+                                  int src_rows, int sx, int sy,
+                                  const int16_t *filter, int x0_q4,
+                                  int y0_q4, int x_step_q4, int y_step_q4,
+                                  int w, int h, int bd, uint16_t *dst,
+                                  int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                            const uint16_t *src, int src_stride, int src_rows,
                            int sx, int sy, const int16_t *filter, int x0_q4,

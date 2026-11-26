@@ -33,7 +33,8 @@ struct avm_gpu_inter {
 };
 
 typedef struct push_constants {
-  uint32_t src_stride, dst_stride, sx, sy, w, h, bd, x0, y0;
+  uint32_t src_stride, dst_stride, sx, sy, w, h, bd, x0, y0, x_step, y_step,
+      pad;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -73,11 +74,13 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   free(in);
 }
 
-int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
-                           const uint16_t *src, int src_stride, int src_rows,
-                           int sx, int sy, const int16_t *filter, int x0_q4,
-                           int y0_q4, int w, int h, int bd, uint16_t *dst,
-                           int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                                  const uint16_t *src, int src_stride,
+                                  int src_rows, int sx, int sy,
+                                  const int16_t *filter, int x0_q4,
+                                  int y0_q4, int x_step_q4, int y_step_q4,
+                                  int w, int h, int bd, uint16_t *dst,
+                                  int dst_stride, char err[AVM_GPU_ERR_LEN]) {
   if (!src || !filter || !dst) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
@@ -90,7 +93,17 @@ int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
     snprintf(err, AVM_GPU_ERR_LEN, "subpel position out of range");
     return -1;
   }
-  if (sx < 3 || sy < 3 || sx + w + 4 > src_stride || sy + h + 4 > src_rows) {
+  if (x_step_q4 < 1 || x_step_q4 > 64 || y_step_q4 < 1 || y_step_q4 > 64) {
+    snprintf(err, AVM_GPU_ERR_LEN, "step out of range");
+    return -1;
+  }
+  /* base already contains the pixel offset: the last output pixel starts at
+   * ((w - 1) * step + phase) >> 4 and its taps reach +4 past that, so the
+   * border grows with the scale factor. */
+  const int last_bx = ((w - 1) * x_step_q4 + x0_q4) >> 4;
+  const int last_by = ((h - 1) * y_step_q4 + y0_q4) >> 4;
+  if (sx < 3 || sy < 3 || sx + last_bx + 4 > src_stride ||
+      sy + last_by + 4 > src_rows) {
     snprintf(err, AVM_GPU_ERR_LEN, "block overlaps the filter border");
     return -1;
   }
@@ -128,7 +141,10 @@ int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                         (uint32_t)h,
                         (uint32_t)bd,
                         (uint32_t)x0_q4,
-                        (uint32_t)y0_q4 };
+                        (uint32_t)y0_q4,
+                        (uint32_t)x_step_q4,
+                        (uint32_t)y_step_q4,
+                        0 };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 3, &pc,
@@ -142,4 +158,14 @@ int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
     }
   }
   return 0;
+}
+
+int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                           const uint16_t *src, int src_stride, int src_rows,
+                           int sx, int sy, const int16_t *filter, int x0_q4,
+                           int y0_q4, int w, int h, int bd, uint16_t *dst,
+                           int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  return avm_gpu_inter_convolve_scaled(ctx, in, src, src_stride, src_rows, sx,
+                                       sy, filter, x0_q4, y0_q4, 16, 16, w, h,
+                                       bd, dst, dst_stride, err);
 }
