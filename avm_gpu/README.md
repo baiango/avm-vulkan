@@ -1,8 +1,9 @@
 # avm_gpu — Vulkan compute backend for AVM
 
-Status: **M0 / proof of parity.** One kernel (`highbd SAD`), one gate, no encoder
-wiring. Everything here is C11 and talks to Vulkan directly; there is no CUDA,
-no wgpu and no C++ in the module.
+Status: **M0 / proof of parity.** Two kernels (`highbd SAD`,
+`highbd variance/SSE`), one gate each, no encoder wiring. Everything here is
+C11 and talks to Vulkan directly; there is no CUDA, no wgpu and no C++ in the
+module.
 
 ## What M0 proves
 
@@ -10,6 +11,9 @@ no wgpu and no C++ in the module.
   **bit-identical** to AVM's own `avm_highbd_sadWxH_c` reference (gate:
   `avm_gpu/test/avm_gpu_sad_test.c`, 9 block sizes, 128 random candidates each,
   modulo 16-bit planes).
+- `avm_gpu_var_*` returns `variance` and `sse` bit-identical to
+  `avm_highbd_{8,10,12}_varianceWxH_c` for 8/10/12-bit data (gate:
+  `test/avm_gpu_var_test.c`, 3 bitdepths x 9 block sizes x 128 candidates).
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -19,8 +23,11 @@ no wgpu and no C++ in the module.
 |---|---|
 | `vulkan_gpu.{h,c}` | instance/device/queue/command pool/fence, host-visible buffers, sync submit |
 | `vulkan_sad.{h,c}` | resident planes + batched SAD dispatch, pipeline and descriptor caching |
+| `vulkan_var.{h,c}` | resident planes + batched variance/SSE, bitdepth scaling and the AVM variance formula on the host |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
+| `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
+| `test/avm_gpu_var_test.c` | parity gate against `avm_highbd_{8,10,12}_variance*_c` |
 
 ## Data model (M0)
 
@@ -33,6 +40,12 @@ no wgpu and no C++ in the module.
   results read back after the fence. M1 stages through device-local memory with
   a copy queue and a persistent arena (the same shape as the VRAM arena in the
   encoder tree).
+- **No 64-bit shader integers.** SSE reaches 2^33 at 12 bit for a 64x64 block,
+  so `variance.comp` accumulates it as an (hi, lo) u32 pair and reduces with
+  explicit carry. That keeps the kernel portable to backends without
+  `Int64`, and the bitdepth scaling (`ROUND_POWER_OF_TWO(sse, 4|8)`) plus the
+  `sse - sum^2/(w*h)` formula run on the host in 64-bit C, verbatim from
+  `avm_dsp/variance.c`.
 - One dispatch per call, one workgroup per candidate, `local_size_x = 256`.
   A 64×64 block costs 16 rows/thread; the batch is what fills the GPU. M2
   should fold the per-frame batch into AVM's own dispatch so there is one
@@ -81,3 +94,5 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - No encoder call site yet. The next step is to route the motion-search SAD
   candidates through `avm_gpu_sad_run()` behind a runtime flag and compare
   bitstreams with the CPU path.
+- `vulkan_sad.c` and `vulkan_var.c` duplicate the pipeline/descriptor setup;
+  that should become one `avm_gpu_pipeline` helper before a third kernel lands.

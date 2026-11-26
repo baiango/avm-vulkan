@@ -1,0 +1,75 @@
+#version 450
+// High-bitdepth variance/SSE, one workgroup per block.
+//
+// Returns raw 64-bit SSE and the signed pixel-difference sum per block. The
+// bitdepth scaling (ROUND_POWER_OF_TWO) and the variance formula run on the
+// host, exactly as in avm_dsp/variance.c, so the kernel stays in u32 land:
+// SSE is carried as an (hi, lo) pair and reduced with explicit carry, which
+// is portable to every backend without 64-bit shader integers.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint s[]; };
+layout(std430, binding = 1) readonly buffer Ref { uint r[]; };
+layout(std430, binding = 2) readonly buffer Pos { uvec2 pos[]; };
+layout(std430, binding = 3) writeonly buffer Out { uvec4 res[]; };
+
+layout(push_constant) uniform PC {
+  uint bw;
+  uint bh;
+  uint src_stride;
+  uint ref_stride;
+  uint count;
+} pc;
+
+shared uint s_lo[256];
+shared uint s_hi[256];
+shared int s_sum[256];
+
+void add_u32(inout uint lo, inout uint hi, uint v) {
+  const uint before = lo;
+  lo += v;
+  if (lo < before) hi += 1u;
+}
+
+void add_pair(uint alo, uint ahi, inout uint lo, inout uint hi) {
+  const uint before = lo;
+  lo += alo;
+  hi += ahi + (lo < before ? 1u : 0u);
+}
+
+void main() {
+  const uint wg = gl_WorkGroupID.x;
+  const uint t = gl_LocalInvocationID.x;
+
+  uint lo = 0u;
+  uint hi = 0u;
+  int sum = 0;
+  if (wg < pc.count) {
+    const uvec2 p = pos[wg];
+    for (uint y = t; y < pc.bh; y += 256u) {
+      const uint so = p.x + y * pc.src_stride;
+      const uint ro = p.y + y * pc.ref_stride;
+      for (uint x = 0u; x < pc.bw; ++x) {
+        const int d = int(s[so + x]) - int(r[ro + x]);
+        sum += d;
+        add_u32(lo, hi, uint(d * d));
+      }
+    }
+  }
+
+  s_lo[t] = lo;
+  s_hi[t] = hi;
+  s_sum[t] = sum;
+  barrier();
+  for (uint st = 128u; st > 0u; st >>= 1u) {
+    if (t < st) {
+      add_pair(s_lo[t + st], s_hi[t + st], s_lo[t], s_hi[t]);
+      s_sum[t] += s_sum[t + st];
+    }
+    barrier();
+  }
+  if (t == 0u && wg < pc.count) {
+    res[wg] = uvec4(s_hi[0], s_lo[0], uint(s_sum[0]), 0u);
+  }
+}
