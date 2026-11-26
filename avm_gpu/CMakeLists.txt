@@ -221,6 +221,11 @@ if(ENABLE_TESTS)
   add_test(NAME avm_gpu_sad_test COMMAND avm_gpu_sad_test)
   # 77 = "no Vulkan device", so machines without a GPU skip instead of failing.
   set_tests_properties(avm_gpu_sad_test PROPERTIES SKIP_RETURN_CODE 77)
+  # Same gate with a device-local arena for the buffers.
+  add_test(NAME avm_gpu_sad_test_arena COMMAND avm_gpu_sad_test)
+  set_tests_properties(
+    avm_gpu_sad_test_arena
+    PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "AV2_GPU_ARENA=1")
 
   add_executable(avm_gpu_var_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_var_test.c")
