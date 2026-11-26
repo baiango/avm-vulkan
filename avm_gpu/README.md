@@ -1,10 +1,10 @@
 # avm_gpu — Vulkan compute backend for AVM
 
-Status: **M0 complete, kernels growing.** Six kernel families (`highbd SAD`,
+Status: **M0 complete, kernels growing.** Seven kernel families (`highbd SAD`,
 `highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT 4x4/8x8 with
 reconstruction add, intra prediction with DC/V/H and the directional zones
-1-3, inter 8-tap subpel convolve), seven gates, and an encoder call site that
-produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
+1-3, inter 8-tap subpel convolve, generic deblock), eight gates, and an
+encoder call site that produces **byte-identical bitstreams**. Everything here is C11 and talks to Vulkan directly; there is no
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
 
@@ -38,6 +38,10 @@ and throughput is not claimed — this milestone is about correctness.
 - `avm_gpu_inter_convolve()` matches `avm_highbd_convolve8_c()` with
   `x_step_q4 = y_step_q4 = 16`: 6 subpel positions x 5 block sizes, whole-pel
   included (gate: `test/avm_gpu_inter_test.c`).
+- `avm_gpu_deblock_generic()` matches `avm_highbd_lpf_{horizontal,vertical}_
+  generic_c()` — filter choice plus the asymmetric delta application — over
+  378 combinations of width pair, q/side thresholds, lossless flags and
+  orientation (gate: `test/avm_gpu_deblock_test.c`).
 - The runtime reaches a device on both Linux (native Vulkan) and macOS
   (MoltenVK), including the portability-driver handshake MoltenVK needs.
 
@@ -53,11 +57,13 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4x4/8x8 with reconstruction add |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction (convolve8) |
+| `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
 | `kernels/itxfm.comp` | inverse DCT butterflies using AVM's inverse kernel matrices |
 | `kernels/inter.comp` | 8-tap separable subpel filter, one invocation per pixel |
+| `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
@@ -66,6 +72,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_intra_test.c` | parity gate against the `avm_highbd_*_predictor_*` set, plus rule/edge checks |
 | `test/avm_gpu_itxfm_test.c` | parity gate against `inv_txfm_c()` |
 | `test/avm_gpu_inter_test.c` | parity gate against `avm_highbd_convolve8_c()` |
+| `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, lazy device init, env-gated |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
@@ -189,6 +196,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT 4x4/8x8 + reconstruction add + parity gate vs inv_txfm_c
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
+- [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] encoder call site with byte-identical bitstream gate
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
@@ -200,8 +208,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: smooth/paeth intra, the remaining inverse
   transform types/sizes (ADST, identity, DDT, 16x16+), compound/warp inter and
-  scaled reference prediction (x_step_q4 != 16), and the loop filters
-  (deblock/CDEF/CCSO/restoration).
+  scaled reference prediction (x_step_q4 != 16), and CDEF / CCSO / loop
+  restoration.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

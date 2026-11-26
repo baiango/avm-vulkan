@@ -1,0 +1,186 @@
+#version 450
+// Generic asymmetric deblock filter, mirroring avm_dsp/loopfilter.c:
+// avm_highbd_lpf_horizontal_generic_c / avm_highbd_lpf_vertical_generic_c,
+// filt_choice_highbd() and filt_generic_asym_highbd().
+//
+// One invocation handles a whole 4-sample call, exactly like the C function:
+// the filter width is decided once from the last of the four columns/rows and
+// then applied to each of them with the min(filter, filt_neg) / filter pair.
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) buffer Img { uint p[]; };
+
+layout(push_constant) uniform PC {
+  uint base;        // index of s[0]
+  uint pitch;       // stride (horizontal) or 1 (vertical)
+  uint filt_neg;    // filt_width_neg
+  uint filt_pos;    // filt_width_pos
+  uint q_thresh;
+  uint side_thresh;
+  uint bd;
+  uint ll_neg;
+  uint ll_pos;
+  uint count;
+} pc;
+
+const int WMULT[8] = { 85, 51, 37, 28, 23, 20, 17, 15 };
+const int QMULT[8] = { 32, 25, 19, 19, 18, 18, 17, 17 };
+const int QFIRST[5] = { 45, 43, 40, 35, 32 };
+const int DF_6_THRESH = 4;
+const int FILT_8_THRESH_SHIFT = 3;
+const int DF_Q_THRESH_SHIFT = 4;
+
+int S(int idx) { return int(p[idx]); }
+int pitch_() { return int(pc.pitch); }
+int maxv() { return (1 << int(pc.bd)) - 1; }
+
+int clipv(int v) { return v < 0 ? 0 : (v > maxv() ? maxv() : v); }
+
+// ROUND_POWER_OF_TWO with a signed value.
+int rp2(int v, int n) { return (v + (1 << (n - 1))) >> n; }
+
+int absi(int v) { return v < 0 ? -v : v; }
+
+int filt_choice(int sIdx, int tIdx, int maxNeg, int maxPos, int qThresh,
+                int sideThresh) {
+  if (qThresh == 0 || sideThresh == 0) return 0;
+
+  const int maxSamplesNeg = maxNeg == 0 ? 0 : maxNeg / 2 - 1;
+  const int maxSamplesPos = maxPos / 2 - 1;
+  if (maxSamplesPos < 1 || maxSamplesPos < maxSamplesNeg) return 0;
+
+  const int st = pitch_();
+  int mask = 0;
+  int sdNeg2, sdPos1, sdNeg1, sdZero;
+
+  sdNeg2 = absi(S(sIdx - 3 * st) - (S(sIdx - 2 * st) << 1) + S(sIdx - st));
+  sdPos1 = absi(S(sIdx) - (S(sIdx + st) << 1) + S(sIdx + 2 * st));
+
+  sdNeg2 += absi(S(tIdx - 3 * st) - (S(tIdx - 2 * st) << 1) + S(tIdx - st));
+  sdNeg2 = (sdNeg2 + 1) >> 1;
+
+  sdPos1 += absi(S(tIdx) - (S(tIdx + st) << 1) + S(tIdx + 2 * st));
+  sdPos1 = (sdPos1 + 1) >> 1;
+
+  if (sdNeg2 > sideThresh || sdPos1 > sideThresh) mask = -1;
+  if (mask != 0) return 0;
+
+  if (maxSamplesPos == 1) return 1;
+
+  // 2-sample test
+  const int sideThresh2 = sideThresh >> 2;
+  if (sdNeg2 > sideThresh2 || sdPos1 > sideThresh2) mask = -1;
+
+  sdNeg1 = absi(S(sIdx - 2 * st) - (S(sIdx - st) << 1) + S(sIdx));
+  sdNeg1 += absi(S(tIdx - 2 * st) - (S(tIdx - st) << 1) + S(tIdx));
+  sdNeg1 = (sdNeg1 + 1) >> 1;
+
+  sdZero = absi(S(sIdx - st) - (S(sIdx) << 1) + S(sIdx + st));
+  sdZero += absi(S(tIdx - st) - (S(tIdx) << 1) + S(tIdx + st));
+  sdZero = (sdZero + 1) >> 1;
+
+  if ((sdNeg1 + sdZero) > qThresh * DF_6_THRESH) mask = -1;
+  if (mask != 0) return 1;
+
+  // 3-sample test
+  const int sideThresh3 = sideThresh >> FILT_8_THRESH_SHIFT;
+  if (sdNeg2 > sideThresh3 || sdPos1 > sideThresh3) mask = -1;
+  if ((sdNeg1 + sdZero) > qThresh * 8) mask = -1;
+
+  int endDir = (sideThresh * 3) >> 4;
+
+  if (maxSamplesNeg > 2) {
+    const int d = (absi((S(sIdx - st) - S(sIdx - 4 * st)) -
+                        3 * (S(sIdx - st) - S(sIdx - 2 * st))) +
+                   absi((S(tIdx - st) - S(tIdx - 4 * st)) -
+                        3 * (S(tIdx - st) - S(tIdx - 2 * st))) +
+                   1) >> 1;
+    if (d > endDir) mask = -1;
+  }
+  {
+    const int d = (absi((S(sIdx) - S(sIdx + 3 * st)) -
+                        3 * (S(sIdx) - S(sIdx + st))) +
+                   absi((S(tIdx) - S(tIdx + 3 * st)) -
+                        3 * (S(tIdx) - S(tIdx + st))) +
+                   1) >> 1;
+    if (d > endDir) mask = -1;
+  }
+  if (mask != 0) return 2;
+  if (maxSamplesPos == 3) return 3;
+
+  // 4 samples and above
+  const int transition = (sdNeg1 + sdZero) << DF_Q_THRESH_SHIFT;
+  int dist = 4;
+  while (dist < 9) {
+    const int q4 = qThresh * QFIRST[dist - 4];
+    if (transition > q4) mask = -1;
+
+    endDir = (sideThresh * dist) >> 4;
+    if (dist == 8) dist = 7;
+
+    if (maxSamplesNeg >= dist) {
+      const int d = (absi((S(sIdx - st) - S(sIdx - (dist + 1) * st)) -
+                          dist * (S(sIdx - st) - S(sIdx - 2 * st))) +
+                     absi((S(tIdx - st) - S(tIdx - (dist + 1) * st)) -
+                          dist * (S(tIdx - st) - S(tIdx - 2 * st))) +
+                     1) >> 1;
+      if (d > endDir) mask = -1;
+    }
+    {
+      const int d = (absi((S(sIdx) - S(sIdx + dist * st)) -
+                          dist * (S(sIdx) - S(sIdx + st))) +
+                     absi((S(tIdx) - S(tIdx + dist * st)) -
+                          dist * (S(tIdx) - S(tIdx + st))) +
+                     1) >> 1;
+      if (d > endDir) mask = -1;
+    }
+    if (dist == 7) dist = 8;
+
+    if (mask != 0) return dist == 4 ? dist - 1 : dist - 2;
+    if (maxSamplesPos <= dist) return (dist >> 1) << 1;
+
+    dist += 2;
+  }
+  return 8;
+}
+
+void filt_asym(int sIdx, int widthNeg, int widthPos, int qThresh) {
+  if (widthNeg < 1 || widthPos < 1) return;
+
+  const int st = pitch_();
+  const int width = max(widthNeg, widthPos);
+  int delta = (3 * (S(sIdx) - S(sIdx - st)) - (S(sIdx + st) - S(sIdx - 2 * st))) * 4;
+  const int clampT = qThresh * QMULT[width - 1];
+  delta = delta < -clampT ? -clampT : (delta > clampT ? clampT : delta);
+
+  if (pc.ll_neg == 0u) {
+    const int dn = delta * WMULT[widthNeg - 1];
+    for (int i = 0; i < widthNeg; i++) {
+      const int idx = sIdx - (i + 1) * st;
+      p[idx] = uint(clipv(S(idx) + rp2(dn * (widthNeg - i), 3 + 8)));
+    }
+  }
+  if (pc.ll_pos == 0u) {
+    const int dp = delta * WMULT[widthPos - 1];
+    for (int i = 0; i < widthPos; i++) {
+      const int idx = sIdx + i * st;
+      p[idx] = uint(clipv(S(idx) - rp2(dp * (widthPos - i), 3 + 8)));
+    }
+  }
+}
+
+void main() {
+  const int count = int(pc.count);
+  const int st = pitch_();
+  const int sIdx = int(pc.base);
+  const int tIdx = sIdx + (count - 1) * st;
+
+  const int filtNeg = (int(pc.filt_neg) >> 1) - 1;
+  const int fw = filt_choice(sIdx, tIdx, int(pc.filt_neg), int(pc.filt_pos),
+                             int(pc.q_thresh), int(pc.side_thresh));
+
+  for (int i = 0; i < count; ++i) {
+    filt_asym(sIdx + i * st, min(fw, filtNeg), fw, int(pc.q_thresh));
+  }
+}
