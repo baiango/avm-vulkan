@@ -1,4 +1,4 @@
-# AVM
+# AVM-Vulkan
 
 > **Fork notice.** This is [`baiango/avm-vulkan`](https://github.com/baiango/avm-vulkan),
 > a fork of [AOMediaCodec/avm](https://github.com/AOMediaCodec/avm). Upstream
