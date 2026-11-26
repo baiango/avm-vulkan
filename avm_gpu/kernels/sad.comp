@@ -1,0 +1,54 @@
+#version 450
+// High-bitdepth SAD, one workgroup per block.
+//
+// M0 data model: one 16-bit sample per 32-bit word (see avm_gpu/README.md for
+// the 16-bit-storage upgrade). Inputs are lowbd (8-bit) or highbd (10/12-bit)
+// planes uploaded into uint32 words, so the arithmetic is plain u32.
+//
+// Every block in the batch is described by a (src_off, ref_off) pair in
+// samples; the same block size and strides apply to the whole dispatch, which
+// is how motion search prices its candidates.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint s[]; };
+layout(std430, binding = 1) readonly buffer Ref { uint r[]; };
+layout(std430, binding = 2) readonly buffer Pos { uvec2 pos[]; };
+layout(std430, binding = 3) writeonly buffer Cost { uint cost[]; };
+
+layout(push_constant) uniform PC {
+  uint bw;
+  uint bh;
+  uint src_stride;
+  uint ref_stride;
+  uint count;
+} pc;
+
+shared uint red[256];
+
+void main() {
+  const uint wg = gl_WorkGroupID.x;
+  const uint t = gl_LocalInvocationID.x;
+
+  uint acc = 0u;
+  if (wg < pc.count) {
+    const uvec2 p = pos[wg];
+    for (uint y = t; y < pc.bh; y += 256u) {
+      const uint so = p.x + y * pc.src_stride;
+      const uint ro = p.y + y * pc.ref_stride;
+      for (uint x = 0u; x < pc.bw; ++x) {
+        const uint a = s[so + x];
+        const uint b = r[ro + x];
+        acc += a > b ? a - b : b - a;
+      }
+    }
+  }
+
+  red[t] = acc;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (t < stride) red[t] += red[t + stride];
+    barrier();
+  }
+  if (t == 0u && wg < pc.count) cost[wg] = red[0];
+}

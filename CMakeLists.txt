@@ -1205,3 +1205,9 @@ endforeach()
 
 # Generate avm.pc and setup install rule.
 setup_avm_install_targets()
+
+# Vulkan compute backend. Off by default; see avm_gpu/README.md.
+option(AV2_ENABLE_VULKAN "Build the Vulkan compute backend in avm_gpu/" OFF)
+if(AV2_ENABLE_VULKAN)
+  add_subdirectory(avm_gpu)
+endif()
