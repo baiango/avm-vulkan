@@ -1,7 +1,7 @@
 # avm_gpu — Vulkan compute backend for AVM
 
 Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
-`highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT 4x4/8x8/16x16/32x32
+`highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT, square and rectangular 4..32
 with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel
 convolve, generic deblock, CDEF block filter, CCSO block pass), ten gates, and an encoder call site that produces
@@ -34,13 +34,15 @@ and throughput is not claimed — this milestone is about correctness.
   combinations x 5 sizes x mrl 0-2, pixel for pixel. The SMOOTH family and
   PAETH match `avm_highbd_{smooth,smooth_v,smooth_h,paeth}_predictor_*_c`
   for 4x4...64x64; SMOOTH* reads above[bw]/left[bh] and PAETH the top-left.
-- `avm_gpu_itxfm_add_m()` reproduces `inv_txfm_c()` (`av2/common/idct.c`) for
-  TX_4X4/TX_8X8/TX_16X16/TX_32X32 DCT_DCT, including `clamp_buf`, the shift
-  pairs (7/10, 7/11, 6/13), the transposed pass layout and
-  `highbd_clip_pixel_add` (gate: `test/avm_gpu_itxfm_test.c`, non-overlapping
-  blocks per size). The 1D pass is the transform matrix itself
-  (`tx_kernel_dct2_sizeN[INV_TXFM][0]`), which matches the idct.c butterflies
-  numerically and keeps |M| <= 90 so no 64-bit products are needed.
+- `avm_gpu_itxfm_add_rect()` reproduces `inv_txfm_c()` (`av2/common/idct.c`)
+  for DCT_DCT in all 16 square and rectangular sizes from 4 to 32, including
+  `clamp_buf`, the per-size `inv_tx_shift` pairs, the `NewInvSqrt2` pre-scale
+  for odd log2(w)+log2(h), the transposed pass layout (the row pass uses the
+  width matrix with a height stride) and `highbd_clip_pixel_add` (gate:
+  `test/avm_gpu_itxfm_test.c`, non-overlapping blocks per size). The 1D pass
+  is the transform matrix itself (`tx_kernel_dct2_sizeN[INV_TXFM][0]`), which
+  matches the idct.c butterflies numerically; |M| <= 90 keeps every product
+  inside 32 bits.
 - `avm_gpu_inter_convolve()` matches `avm_highbd_convolve8_c()` with
   `x_step_q4 = y_step_q4 = 16`: 6 subpel positions x 5 block sizes, whole-pel
   included (gate: `test/avm_gpu_inter_test.c`).
@@ -216,7 +218,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
 - [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability, edges)
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
-- [x] inverse DCT 4x4/8x8/16x16/32x32 + reconstruction add + parity gate vs inv_txfm_c
+- [x] inverse DCT, 16 square and rectangular sizes 4..32, + parity gate
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
 - [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
 - [x] CDEF block filter + parity gate (5760 cases)
@@ -231,7 +233,7 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   only); variance and transform still widen to 32-bit words. Buffers are
   host-visible and re-uploaded per call; the device-local arena is still to do.
 - Kernel families still missing: the non-DCT inverse types (ADST, identity,
-  DDT) and rectangular transform sizes, compound/warp inter and scaled
+  DDT) and the 64-wide transform sizes, compound/warp inter and scaled
   reference prediction (x_step_q4 != 16), and loop restoration. Note that AVM 1.0's
   restoration is the PC-Wiener engine (`apply_pc_wiener_highbd`,
   `apply_wienerns_class_id_highbd`), not the classic Wiener/self-guided pair,

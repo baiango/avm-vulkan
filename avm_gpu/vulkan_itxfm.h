@@ -40,6 +40,17 @@ void avm_gpu_itxfm_destroy(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm);
  * output index), i.e. tx_kernel_dct2_sizeN[INV_TXFM][0]. Required for sizes
  * 16 and 32; NULL selects the built-in 4x4/8x8 tables.
  */
+/*
+ * Rectangular DCT_DCT (any w,h in {4,8,16,32}), with the per-size
+ * inv_tx_shift pair and the NewInvSqrt2 pre-scale for odd log2(w)+log2(h).
+ * mat_w / mat_h are tx_kernel_dct2_sizeW/H[INV_TXFM][0].
+ */
+int avm_gpu_itxfm_add_rect(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
+                           const int32_t *coeffs, const uint32_t *dst_off,
+                           int n, int w, int h, int bd, const int *mat_w,
+                           const int *mat_h, uint16_t *dest, int stride,
+                           int rows, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_itxfm_add_m(avm_gpu_ctx *ctx, avm_gpu_itxfm *itxfm,
                         const int32_t *coeffs, const uint32_t *dst_off, int n,
                         int size, int bd, const int *matrix, uint16_t *dest,

@@ -1,14 +1,13 @@
 #version 450
-// Inverse DCT, any of 4x4 / 8x8 / 16x16 / 32x32 (DCT_DCT) with reconstruction
-// add.
+// Inverse DCT, square and rectangular (4..32 in each dimension), DCT_DCT,
+// with reconstruction add.
 //
-// Mirrors av2/common/idct.c inv_txfm_c(): clamp_buf to bd + 8 bits, the
-// inv_tx_shift pair for the size, the transposed per-pass layout, the bd + 8 /
-// bd clamp ranges and highbd_clip_pixel_add. The 1D pass is the transform
-// matrix itself (tx_kernel_dct2_sizeN[INV_TXFM][0]): out[k] = sum_j src[j] *
-// M[j][k], which is exactly what the butterflies in idct.c evaluate. AVM's
-// matrices are small (|v| <= 90), so with coefficients clamped to bd + 8 bits
-// every product fits in 32 bits.
+// Mirrors av2/common/idct.c inv_txfm_c(): optional NewInvSqrt2 pre-scaling for
+// odd log2(w)+log2(h), clamp_buf to bd + 8 bits, the per-size inv_tx_shift
+// pair, the transposed per-pass layout (row pass uses the width matrix and a
+// height stride, column pass the height matrix and a width stride), the bd + 8
+// / bd clamp ranges and highbd_clip_pixel_add. The 1D pass is the transform
+// matrix product, which is what the idct.c butterflies evaluate.
 
 layout(local_size_x = 32) in;
 
@@ -18,24 +17,28 @@ layout(std430, binding = 2) buffer Dst { uint d[]; };
 layout(std430, binding = 3) readonly buffer Mat { int m[]; };
 
 layout(push_constant) uniform PC {
-  uint size_;  // 4, 8, 16 or 32
+  uint w;
+  uint h;
   uint bd;
   uint stride;
   uint count;
   uint shift1;
   uint shift2;
-  uint pad0;
-  uint pad1;
+  uint sqrt2;
 } pc;
+
+const int NEW_INV_SQRT2 = 2896;
+const int NEW_SQRT2_BITS = 12;
 
 int clampv(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// One 1D inverse transform: dst[k] for k in [0, size), read as src[0..size).
-void inv1d(int src[32], out int dst[32], int size, int shift, int lo, int hi) {
+// 1D inverse: dst[k] = sum_j src[j] * M[j * n + k], rounded and clamped.
+void inv1d(int src[32], out int dst[32], int n, int mat_off, int shift, int lo,
+           int hi) {
   const int add = 1 << (shift - 1);
-  for (int k = 0; k < size; ++k) {
+  for (int k = 0; k < n; ++k) {
     int acc = 0;
-    for (int j = 0; j < size; ++j) acc += src[j] * m[j * size + k];
+    for (int j = 0; j < n; ++j) acc += src[j] * m[mat_off + j * n + k];
     dst[k] = clampv((acc + add) >> shift, lo, hi);
   }
 }
@@ -44,40 +47,46 @@ void main() {
   const uint b = gl_GlobalInvocationID.x;
   if (b >= pc.count) return;
 
-  const int size_ = int(pc.size_);
+  const int w = int(pc.w);
+  const int h = int(pc.h);
   const int bd = int(pc.bd);
   const int mid = 1 << (bd + 7);
   const int colmax = 1 << bd;
   const uint src_off = pos[b].x;
   const uint dst_off = pos[b].y;
+  const int wmat = 0;
+  const int hmat = w * w;
 
   int block[1024];
   int tmp[1024];
 
-  for (int i = 0; i < size_ * size_; ++i) {
-    block[i] = clampv(c[src_off + uint(i)], -mid, mid - 1);
+  // Optional 1/sqrt(2) pre-scale for rectangular transforms, then clamp_buf.
+  for (int i = 0; i < w * h; ++i) {
+    int v = c[src_off + uint(i)];
+    if (pc.sqrt2 != 0u) v = (v * NEW_INV_SQRT2 + (1 << (NEW_SQRT2_BITS - 1))) >> NEW_SQRT2_BITS;
+    block[i] = clampv(v, -mid, mid - 1);
   }
 
-  // Pass 1: rows of the coefficient block, transposed into tmp.
-  for (int j = 0; j < size_; ++j) {
+  // Row pass: length w, written transposed with stride h.
+  for (int j = 0; j < h; ++j) {
     int s[32], o[32];
-    for (int k = 0; k < size_; ++k) s[k] = block[j * size_ + k];
-    inv1d(s, o, size_, int(pc.shift1), -mid, mid - 1);
-    for (int k = 0; k < size_; ++k) tmp[k * size_ + j] = o[k];
+    for (int k = 0; k < w; ++k) s[k] = block[j * w + k];
+    inv1d(s, o, w, wmat, int(pc.shift1), -mid, mid - 1);
+    for (int k = 0; k < w; ++k) tmp[k * h + j] = o[k];
   }
-  // Pass 2: rows of tmp back into the block.
-  for (int j = 0; j < size_; ++j) {
+  // Column pass: length h, written back with stride w.
+  for (int j = 0; j < w; ++j) {
     int s[32], o[32];
-    for (int k = 0; k < size_; ++k) s[k] = tmp[j * size_ + k];
-    inv1d(s, o, size_, int(pc.shift2), -colmax, colmax - 1);
-    for (int k = 0; k < size_; ++k) block[k * size_ + j] = o[k];
+    for (int k = 0; k < h; ++k) s[k] = tmp[j * h + k];
+    inv1d(s, o, h, hmat, int(pc.shift2), -colmax, colmax - 1);
+    for (int k = 0; k < h; ++k) block[k * w + j] = o[k];
   }
 
   const int maxv = (1 << bd) - 1;
-  for (int y = 0; y < size_; ++y) {
-    for (int x = 0; x < size_; ++x) {
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
       const uint idx = dst_off + uint(y) * pc.stride + uint(x);
-      int v = int(d[idx]) + block[y * size_ + x];
+      int v = int(d[idx]) + block[y * w + x];
       d[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
     }
   }
