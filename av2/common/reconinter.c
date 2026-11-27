@@ -157,8 +157,7 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
 #if defined(AVM_GPU_HOOKS)
     // Optional Vulkan path (avm_gpu/): single reference, unscaled, 8-tap.
     // Returns 0 and falls through to the RTCD convolve otherwise.
-    if (!inter_pred_params->conv_params.is_compound &&
-        !inter_pred_params->is_intrabc && inter_pred_params->interp_filter_params[0] &&
+    if (!inter_pred_params->is_intrabc && inter_pred_params->interp_filter_params[0] &&
         inter_pred_params->interp_filter_params[1]) {
       const int scaled = has_scale(subpel_params->xs, subpel_params->ys);
       SubpelParams sp = *subpel_params;
@@ -176,7 +175,13 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
                              sp.subpel_x, sp.subpel_y,
                              inter_pred_params->conv_params.round_0,
                              inter_pred_params->conv_params.round_1, scaled,
-                             sp.xs, sp.ys)) {
+                             sp.xs, sp.ys,
+                             inter_pred_params->conv_params.is_compound,
+                             inter_pred_params->conv_params.do_average,
+                             inter_pred_params->conv_params.dst,
+                             inter_pred_params->conv_params.dst_stride,
+                             inter_pred_params->conv_params.fwd_offset,
+                             inter_pred_params->conv_params.bck_offset)) {
         return;
       }
     }

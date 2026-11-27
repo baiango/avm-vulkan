@@ -72,6 +72,20 @@ int avm_gpu_inter_convolve_scaled_sr(
     int y_step_qn, int w, int h, int bd, int round0, int round1, uint16_t *dst,
     int dst_stride, char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Compound prediction, the CWP family: av2_highbd_cwp_convolve_2d_c() for one
+ * reference and one pass. conv (uint16, conv_stride) is the high-precision
+ * buffer; conv_index 0 with do_average 0 writes only that, conv_index 1
+ * combines with it, subtracts the two pass biases and writes pixels.
+ */
+int avm_gpu_inter_cwp_convolve(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int subpel_y_qn, int w, int h,
+    int bd, int round0, int round1, uint16_t *conv, int conv_stride,
+    int conv_index, int do_average, int uneven, int fwd, int bck,
+    uint16_t *dst, int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                             const uint16_t *src0, int s0_stride,
                             const uint16_t *src1, int s1_stride,

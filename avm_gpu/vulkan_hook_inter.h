@@ -42,7 +42,9 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                        const int16_t *filter_x, const int16_t *filter_y,
                        int taps_x, int taps_y, int subpel_x_qn,
                        int subpel_y_qn, int round_0, int round_1, int scaled,
-                       int x_step_qn, int y_step_qn);
+                       int x_step_qn, int y_step_qn, int is_compound,
+                       int do_average, uint16_t *conv_dst, int conv_stride,
+                       int fwd_offset, int bck_offset);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -30,6 +30,7 @@ typedef struct inter_hook_state {
   avm_gpu_ctx *ctx;
   avm_gpu_inter *inter;
   unsigned long blocks;
+  unsigned long compound;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -37,8 +38,9 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void print_stats(void) {
   if (getenv("AV2_GPU_INTER_STATS")) {
-    fprintf(stderr, "avm_gpu: %lu inter prediction blocks on the GPU\n",
-            g_hook.blocks);
+    fprintf(stderr,
+            "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound)\n",
+            g_hook.blocks, g_hook.compound);
   }
 }
 
@@ -72,7 +74,9 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                        const int16_t *filter_x, const int16_t *filter_y,
                        int taps_x, int taps_y, int subpel_x_qn,
                        int subpel_y_qn, int round_0, int round_1, int scaled,
-                       int x_step_qn, int y_step_qn) {
+                       int x_step_qn, int y_step_qn, int is_compound,
+                       int do_average, uint16_t *conv_dst, int conv_stride,
+                       int fwd_offset, int bck_offset) {
   if (!src || !dst || !filter_x || !filter_y) return 0;
   if (w <= 0 || h <= 0 || w > HOOK_MAX_DIM || h > HOOK_MAX_DIM) return 0;
   if (taps_x != HOOK_SUBPEL_TAPS || taps_y != HOOK_SUBPEL_TAPS) return 0;
@@ -87,6 +91,15 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     return 0;
   }
   if (src_stride < w + 2 * HOOK_BORDER || dst_stride < w) return 0;
+
+  /* Compound (two passes over the CWP high-precision buffer) is only taken
+   * unscaled and only where the C takes its 2D path: with a zero phase on one
+   * axis AVM switches to av2_highbd_cwp_convolve_x/y/copy, which is a different
+   * rounding, and those stay on the CPU. */
+  if (is_compound &&
+      (scaled || !conv_dst || subpel_x_qn == 0 || subpel_y_qn == 0)) {
+    return 0;
+  }
 
   pthread_mutex_lock(&g_lock);
   int handled = 0;
@@ -107,8 +120,20 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
      * less makes the entry point decline every case (and the reproducer now
      * treats a decline as a failure, which an earlier revision of it did not -
      * that is how a short window stayed invisible). */
-    const int rows = last_by + 2 * HOOK_BORDER + 1;
-    const int rc =
+    /* The compound entry point bounds the block by w/h (+4 taps), not by the
+     * last base row, so it needs one row more than the sr path. */
+    const int rows = last_by + 2 * HOOK_BORDER + (is_compound ? 2 : 1);
+    int rc;
+    if (is_compound) {
+      const int uneven =
+          fwd_offset != (1 << (4 - 1)) || bck_offset != (1 << (4 - 1));
+      rc = avm_gpu_inter_cwp_convolve(
+          g_hook.ctx, g_hook.inter, window, src_stride, rows, HOOK_BORDER,
+          HOOK_BORDER, filter_x, filter_y, subpel_x_qn, subpel_y_qn, w, h, bd,
+          round_0, round_1, conv_dst, conv_stride, do_average, do_average,
+          uneven, fwd_offset, bck_offset, dst, dst_stride, err);
+    } else {
+    rc =
         scaled ? avm_gpu_inter_convolve_scaled_sr(
                      g_hook.ctx, g_hook.inter, window, src_stride, rows,
                      HOOK_BORDER, HOOK_BORDER, filter_x, filter_y, subpel_x_qn,
@@ -120,8 +145,10 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                                            subpel_x_qn, subpel_y_qn, w, h, bd,
                                            round_0, round_1, dst, dst_stride,
                                            err);
+    }
     if (rc == 0) {
       g_hook.blocks++;
+      if (is_compound) g_hook.compound++;
       handled = 1;
     }
   }

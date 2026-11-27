@@ -118,6 +118,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
+| `kernels/cwpconv.comp` | compound prediction, the CWP family: `av2_highbd_cwp_convolve_2d_c()` two passes over the high-precision buffer |
 | `kernels/pcwiener.comp` | PC-Wiener loop restoration: the symmetric 25-tap non-separable filter per 4x4 class block, one invocation per pixel |
 | `kernels/pcwcls.comp` | PC-Wiener classification: 6x6 directional-feature and tx-skip box sums, qval/tskip LUT, thresholds and class LUT, one invocation per 4x4 block |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
@@ -361,6 +362,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] PC-Wiener classification stage + end-to-end gate (class ids and the
       restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
       tx-skip on/off)
+- [x] compound inter (CWP 2D) kernel + parity gate (2 bitdepths x even/uneven
+      weights x 6 subpel positions) and, in the seam, compound prediction itself
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
       kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
       8-tap), with the encoder bitstream gate on a half-pel motion clip
@@ -392,6 +395,12 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   less makes the seam decline every case. The seam test treats a decline as a
   failure - an earlier revision of it counted declines as passes, which is why
   an under-sized window looked clean.
+- **Compound prediction** now has its own kernel and call site: for a 2D
+  compound call (a non-zero phase on both axes, unscaled, single reference
+  pass) the seam runs `kernels/cwpconv.comp` and leaves the CWP x-only/y-only/
+  copy variants - a different rounding - on the CPU. The seam gate covers both
+  passes (even and uneven weights) and the encoder now prices 2,530 compound
+  blocks with an unchanged bitstream.
 - **Compound prediction is not a seam extension.** AVM 1.0 does not produce two
   sr predictors and blend them: with `conv_params->is_compound`,
   `av2_highbd_convolve_2d_facade()` dispatches to the CWP family

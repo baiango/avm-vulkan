@@ -1,0 +1,77 @@
+#version 450
+// Compound inter prediction (the CWP family), one invocation per output pixel.
+//
+// Mirrors av2_highbd_cwp_convolve_2d_c() (av2/common/convolve.c): 8-tap x 8-tap,
+// 16-bit intermediate rounded by round_0, the vertical result truncated to
+// CONV_BUF_TYPE (uint16_t), then either the first pass (do_average == 0, write
+// that buffer) or the second pass (combine - plain or uneven weighted at
+// DIST_PRECISION_BITS - subtract the two pass biases, round and clip).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Src { uint s[]; };
+layout(std430, binding = 1) readonly buffer Filt { int f[]; };
+layout(std430, binding = 2) buffer Conv { uint conv[]; };
+layout(std430, binding = 3) writeonly buffer Dst { uint d[]; };
+
+layout(push_constant) uniform PC {
+  uint src_stride, conv_stride, dst_stride;
+  uint w, h, bd;
+  uint x0, y0;      // subpel position in 1/16 units, at the block origin
+  uint sx, sy;      // block origin inside the uploaded plane
+  uint round0, round1;
+  uint do_average, uneven, fwd, bck, conv_index;
+} pc;
+
+int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
+
+int round_pow2(int v, int n) {
+  int rnd = 1 << (n - 1);
+  return v < 0 ? -((-v + rnd) >> n) : ((v + rnd) >> n);
+}
+
+void main() {
+  const int x = int(gl_GlobalInvocationID.x);
+  const int y = int(gl_GlobalInvocationID.y);
+  if (x >= int(pc.w) || y >= int(pc.h)) return;
+
+  const int bd = int(pc.bd);
+  const int maxv = (1 << bd) - 1;
+  const int ss = int(pc.src_stride);
+  const int r0 = int(pc.round0);
+  const int r1 = int(pc.round1);
+  // av2_highbd_cwp_convolve_2d_c() picks the filter row from the subpel phase
+  // and the sample block from the pixel index: no integer shift by the phase.
+  const int fh = int(pc.x0) * 8;
+  const int fv = 128 + int(pc.y0) * 8;
+
+  int im[8];
+  const int hbias = 1 << (bd + 6);   // 1 << (bd + FILTER_BITS - 1)
+  for (int ky = 0; ky < 8; ++ky) {
+    const int row = int(pc.sy) + y + ky - 3;
+    int sum = hbias;
+    for (int kx = 0; kx < 8; ++kx) {
+      sum += f[fh + kx] * int(s[row * ss + int(pc.sx) + x + kx - 3]);
+    }
+    im[ky] = (round_pow2(sum, r0) << 16) >> 16;  // stored as int16_t
+  }
+
+  const int offset_bits = bd + 14 - r0;
+  int vsum = 1 << offset_bits;
+  for (int ky = 0; ky < 8; ++ky) vsum += f[fv + ky] * im[ky];
+  const int res = round_pow2(vsum, r1) & 0xffff;  // CONV_BUF_TYPE is uint16_t
+  const uint idx = uint(y) * pc.dst_stride + uint(x);
+  conv[y * int(pc.conv_stride) + x] = uint(res);
+  if (pc.conv_index == 0u && pc.do_average == 0u) return;
+
+  int tmp;
+  if (pc.do_average == 0u) {
+    tmp = res;
+  } else {
+    const int prev = int(conv[y * int(pc.conv_stride) + x]);
+    tmp = pc.uneven != 0u ? (prev * int(pc.fwd) + res * int(pc.bck)) >> 4
+                          : (prev + res) >> 1;
+    tmp -= (1 << (offset_bits - r1)) + (1 << (offset_bits - r1 - 1));
+  }
+  d[idx] = uint(clipval(round_pow2(tmp, 14 - r0 - r1), maxv));
+}

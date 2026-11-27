@@ -30,6 +30,12 @@
 
 /* av2/common/convolve.c; the single-reference prediction paths the encoder
  * uses (unscaled and scaled reference). */
+void av2_highbd_cwp_convolve_2d_c(const uint16_t *src, int src_stride,
+                                  uint16_t *dst, int dst_stride, int w, int h,
+                                  const InterpFilterParams *filter_params_x,
+                                  const InterpFilterParams *filter_params_y,
+                                  const int subpel_x_qn, const int subpel_y_qn,
+                                  ConvolveParams *conv_params, int bd);
 void av2_highbd_convolve_2d_scale_c(const uint16_t *src, int src_stride,
                                     uint16_t *dst, int dst_stride, int w, int h,
                                     const InterpFilterParams *filter_params_x,
@@ -362,6 +368,95 @@ int main(void) {
         printf("scale %-4d (%4d,%4d) %-6d %10.3f %10.3f %s\n", kStep[st],
                kSub[st][0], kSub[st][1], n, 0.0, 0.0,
                diff ? "MISMATCH" : "ok");
+      }
+    }
+  }
+
+  /* Compound prediction, the CWP family: two passes over the high-precision
+   * buffer, plain and uneven weighted. The kernel is handed the plane and the
+   * block origin inside it, as the C is. */
+  {
+    InterpFilterParams fp_x;
+    InterpFilterParams fp_y;
+    memset(&fp_x, 0, sizeof(fp_x));
+    memset(&fp_y, 0, sizeof(fp_y));
+    fp_x.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_x.taps = 8;
+    fp_y.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_y.taps = 8;
+    uint16_t cpu_conv[64 * DST_STRIDE], gpu_conv[64 * DST_STRIDE];
+    for (int bd = 10; bd <= 12; bd += 2) {
+      for (int uneven = 0; uneven <= 1; uneven++) {
+        for (size_t p = 0; p < sizeof(kPos) / sizeof(kPos[0]); p++) {
+          const int n = 64;
+          const int sx = 6, sy = 5;
+          ConvolveParams conv =
+              get_conv_params_no_round(0, 0, cpu_conv, DST_STRIDE, 1, bd);
+          if (uneven) {
+            conv.fwd_offset = 10;
+            conv.bck_offset = 6;
+          }
+          memset(cpu_conv, 0, sizeof(cpu_conv));
+          memset(gpu_conv, 0, sizeof(gpu_conv));
+          memset(cpu, 0, sizeof(cpu));
+          memset(gpu, 0, sizeof(gpu));
+          conv.do_average = 0;
+          av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu,
+                                       DST_STRIDE, n, n, &fp_x, &fp_y,
+                                       kPos[p][0], kPos[p][1], &conv, bd);
+          int diff = 0;
+          if (avm_gpu_inter_cwp_convolve(
+                  ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                  (const int16_t *)av2_sub_pel_filters_8,
+                  (const int16_t *)av2_sub_pel_filters_8, kPos[p][0],
+                  kPos[p][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
+                  DST_STRIDE, 0, 0, 0, 0, 0, gpu, DST_STRIDE, err) != 0) {
+            fprintf(stderr, "avm_gpu cwp pass1: %s\n", err);
+            return 1;
+          }
+          for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+              if (cpu_conv[y * DST_STRIDE + x] != gpu_conv[y * DST_STRIDE + x]) {
+                if (diff < 3) {
+                  printf("  cwp1 bd%d uneven%d (%d,%d): gpu %u != cpu %u\n", bd,
+                         uneven, x, y, gpu_conv[y * DST_STRIDE + x],
+                         cpu_conv[y * DST_STRIDE + x]);
+                }
+                diff++;
+              }
+            }
+          }
+          conv.do_average = 1;
+          av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu,
+                                       DST_STRIDE, n, n, &fp_x, &fp_y,
+                                       kPos[p][0], kPos[p][1], &conv, bd);
+          if (avm_gpu_inter_cwp_convolve(
+                  ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                  (const int16_t *)av2_sub_pel_filters_8,
+                  (const int16_t *)av2_sub_pel_filters_8, kPos[p][0],
+                  kPos[p][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
+                  DST_STRIDE, 1, 1, uneven, conv.fwd_offset, conv.bck_offset,
+                  gpu, DST_STRIDE, err) != 0) {
+            fprintf(stderr, "avm_gpu cwp pass2: %s\n", err);
+            return 1;
+          }
+          for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+              if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) {
+                if (diff < 3) {
+                  printf("  cwp2 bd%d uneven%d (%d,%d): gpu %u != cpu %u\n", bd,
+                         uneven, x, y, gpu[y * DST_STRIDE + x],
+                         cpu[y * DST_STRIDE + x]);
+                }
+                diff++;
+              }
+            }
+          }
+          failures += diff != 0;
+          printf("cwp bd%-2d %s (%2d,%2d) %-6d %10.3f %10.3f %s\n", bd,
+                 uneven ? "uneven" : "even  ", kPos[p][0], kPos[p][1], n, 0.0,
+                 0.0, diff ? "MISMATCH" : "ok");
+        }
       }
     }
   }

@@ -27,13 +27,24 @@
 #ifndef AVM_GPU_CWP_SPV_PATH
 #define AVM_GPU_CWP_SPV_PATH "cwp.spv"
 #endif
+#ifndef AVM_GPU_CWPCONV_SPV_PATH
+#define AVM_GPU_CWPCONV_SPV_PATH "cwpconv.spv"
+#endif
 
 #define INTER_FILTER_ENTRIES (16 * 8)
+
+typedef struct cwp_constants {
+  uint32_t src_stride, conv_stride, dst_stride, w, h, bd, x0, y0, sx, sy;
+  uint32_t round0, round1, do_average, uneven, fwd, bck, conv_index;
+} cwp_constants;
 
 struct avm_gpu_inter {
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *blend_pipe;
   avm_gpu_pipeline *cwp_pipe;
+  avm_gpu_pipeline *cwpconv_pipe;
+  avm_gpu_buf cwpconv_conv, cwpconv_dst;
+  VkDeviceSize cwpconv_conv_cap, cwpconv_dst_cap;
   avm_gpu_buf cpred, cref, cout;
   VkDeviceSize cpred_cap, cref_cap, cout_cap;
   avm_gpu_buf s0, s1, mask, bdst;
@@ -68,6 +79,12 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_CWPCONV_SPV_PATH,
+                              "AVM_GPU_CWPCONV_SPV", 4, sizeof(cwp_constants),
+                              &in->cwpconv_pipe, err) != 0) {
+    free(in);
+    return -1;
+  }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_INTER_SPV_PATH, "AVM_GPU_INTER_SPV",
                               3, sizeof(push_constants), &in->pipe,
                               err) != 0) {
@@ -94,6 +111,9 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   avm_gpu_pipeline_destroy(ctx, in->pipe);
   avm_gpu_pipeline_destroy(ctx, in->blend_pipe);
   avm_gpu_pipeline_destroy(ctx, in->cwp_pipe);
+  avm_gpu_pipeline_destroy(ctx, in->cwpconv_pipe);
+  avm_gpu_buf_destroy(ctx, &in->cwpconv_conv);
+  avm_gpu_buf_destroy(ctx, &in->cwpconv_dst);
   avm_gpu_buf_destroy(ctx, &in->src);
   avm_gpu_buf_destroy(ctx, &in->filt);
   avm_gpu_buf_destroy(ctx, &in->dst);
@@ -374,4 +394,98 @@ int avm_gpu_inter_convolve_scaled_sr(
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
                        subpel_x_qn, subpel_y_qn, x_step_qn, y_step_qn, w, h, bd,
                        dst, dst_stride, 1, round0, round1, filter_y, 10, err);
+}
+
+int avm_gpu_inter_cwp_convolve(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int subpel_y_qn, int w, int h,
+    int bd, int round0, int round1, uint16_t *conv, int conv_stride,
+    int conv_index, int do_average, int uneven, int fwd, int bck,
+    uint16_t *dst, int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  if (!src || !filter_x || !filter_y || !conv || !dst) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (w <= 0 || h <= 0 || w > 64 || h > 64 || sx < 3 || sy < 3) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported block %dx%d at %d,%d", w, h, sx,
+             sy);
+    return -1;
+  }
+  if (subpel_x_qn < 0 || subpel_x_qn > 15 || subpel_y_qn < 0 ||
+      subpel_y_qn > 15) {
+    snprintf(err, AVM_GPU_ERR_LEN, "subpel position out of range");
+    return -1;
+  }
+  if (sx + w + 4 > src_stride || sy + h + 4 > src_rows) {
+    snprintf(err, AVM_GPU_ERR_LEN, "block overlaps the filter border");
+    return -1;
+  }
+
+  const size_t pixels = (size_t)src_stride * (size_t)src_rows;
+  if (pixels > in->expand_cap) {
+    free(in->expand);
+    in->expand = malloc(pixels * sizeof(*in->expand));
+    in->expand_cap = in->expand ? pixels : 0;
+    if (!in->expand) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
+
+  const size_t conv_n = (size_t)conv_stride * (size_t)h;
+  const size_t dst_n = (size_t)dst_stride * (size_t)h;
+  if (ensure_buf(ctx, &in->src, &in->src_cap, (VkDeviceSize)pixels * 4, err) ||
+      ensure_buf(ctx, &in->filt, &in->filt_cap,
+                 (VkDeviceSize)(2 * INTER_FILTER_ENTRIES) * 4, err) ||
+      ensure_buf(ctx, &in->cwpconv_conv, &in->cwpconv_conv_cap,
+                 (VkDeviceSize)conv_n * 4, err) ||
+      ensure_buf(ctx, &in->cwpconv_dst, &in->cwpconv_dst_cap,
+                 (VkDeviceSize)dst_n * 4, err)) {
+    return -1;
+  }
+  memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+  int *fp = in->filt.mapped;
+  for (int i = 0; i < INTER_FILTER_ENTRIES; i++) {
+    fp[i] = (int)filter_x[i];
+    fp[INTER_FILTER_ENTRIES + i] = (int)filter_y[i];
+  }
+  uint32_t *cv = in->cwpconv_conv.mapped;
+  for (size_t i = 0; i < conv_n; i++) cv[i] = conv[i];
+  uint32_t *dp = in->cwpconv_dst.mapped;
+  for (size_t i = 0; i < dst_n; i++) dp[i] = dst[i];
+
+  const avm_gpu_buf bufs[4] = { in->src, in->filt, in->cwpconv_conv,
+                                in->cwpconv_dst };
+  cwp_constants pc = { (uint32_t)src_stride,
+                       (uint32_t)conv_stride,
+                       (uint32_t)dst_stride,
+                       (uint32_t)w,
+                       (uint32_t)h,
+                       (uint32_t)bd,
+                       (uint32_t)subpel_x_qn,
+                       (uint32_t)subpel_y_qn,
+                       (uint32_t)sx,
+                       (uint32_t)sy,
+                       (uint32_t)round0,
+                       (uint32_t)round1,
+                       (uint32_t)do_average,
+                       (uint32_t)uneven,
+                       (uint32_t)fwd,
+                       (uint32_t)bck,
+                       (uint32_t)conv_index };
+  const uint32_t gx = (uint32_t)((w + 7) / 8);
+  const uint32_t gy = (uint32_t)((h + 7) / 8);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwpconv_pipe, bufs, 4,
+                                              &pc, sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+
+  const uint32_t *res_conv = in->cwpconv_conv.mapped;
+  for (size_t i = 0; i < conv_n; i++) conv[i] = (uint16_t)res_conv[i];
+  if (!(conv_index == 0 && do_average == 0)) {
+    const uint32_t *res_dst = in->cwpconv_dst.mapped;
+    for (size_t i = 0; i < dst_n; i++) dst[i] = (uint16_t)res_dst[i];
+  }
+  return 0;
 }
