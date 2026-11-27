@@ -35,7 +35,9 @@
 #include "av2/common/filter.h"
 
 #include "avm_gpu/vulkan_gpu.h"
+#include "avm_dsp/blend.h"
 #include "avm_gpu/vulkan_hook_inter.h"
+
 #include "avm_gpu/vulkan_inter.h"
 
 void av2_highbd_convolve_2d_sr_c(const uint16_t *src, int src_stride,
@@ -200,6 +202,40 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven, int scaled,
   return diff;
 }
 
+/* Masked blend (inter-intra / wedge masks): the seam against
+ * avm_highbd_blend_a64_mask(). */
+static int run_blend(int n, int subw, int subh, int mask_stride) {
+  static uint16_t l0[2 * SRC_W * SRC_H], l1[2 * SRC_W * SRC_H];
+  static uint16_t d_cpu[2 * SRC_W * SRC_H], d_gpu[2 * SRC_W * SRC_H];
+  static uint8_t mask[4 * SRC_W * SRC_H];
+  const int stride = SRC_W;
+  for (int i = 0; i < SRC_W * SRC_H; i++) {
+    l0[i] = (uint16_t)(rnd() & 0x3ff);
+    l1[i] = (uint16_t)(rnd() & 0x3ff);
+    d_cpu[i] = 0;
+    d_gpu[i] = 0;
+  }
+  /* A subsampled mask carries 2x2 samples per output sample, hence the
+   * mask_stride the caller passes. */
+  for (int i = 0; i < 4 * SRC_W * SRC_H; i++) mask[i] = (uint8_t)(rnd() & 63);
+  avm_highbd_blend_a64_mask_c(d_cpu, stride, l0, stride, l1, stride, mask,
+                            mask_stride, n, n, subw, subh, BD);
+  if (!avm_gpu_hook_blend_a64(d_gpu, stride, l0, stride, l1, stride, mask,
+                              mask_stride, n, n, subw, subh, BD)) {
+    return -1;
+  }
+  int diff = 0;
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      if (d_cpu[y * stride + x] != d_gpu[y * stride + x]) diff++;
+    }
+  }
+  if (diff) {
+    printf("  blend n=%d subw=%d subh=%d: %d samples\n", n, subw, subh, diff);
+  }
+  return diff;
+}
+
 static int run_case(int scaled, int n, int sub_x, int sub_y, int step) {
   const InterpFilterParams fp_x = { (const int16_t *)av2_sub_pel_filters_8, 8 };
   const InterpFilterParams fp_y = { (const int16_t *)av2_sub_pel_filters_8, 8 };
@@ -265,7 +301,7 @@ int main(int argc, char **argv) {
   int first_declined_it = -1;
   const int verbose = getenv("SEAM_VERBOSE") != NULL;
   for (int it = 0; it < iters; it++) {
-    const int mode = it % 3;   /* 0 unscaled, 1 scaled, 2 compound */
+    const int mode = it % 4;   /* 0 unscaled, 1 scaled, 2 compound */
     const int scaled = mode == 1;
     const int n = 4 << (it % 5); /* 4, 8, 16, 32, 64 */
     const int step = scaled ? 910 : 16;
@@ -279,7 +315,10 @@ int main(int argc, char **argv) {
     const int cwp_y = (sub_y % 15) + 1;   /* 1..15: the seam needs a y phase */
     const int cwp_x = sub_x % 16;
     const int expect_decline = mode == 2 && cwp_y == 0; /* never: y >= 1 */
-    const int rc = mode == 2
+    const int rc = mode == 3
+                       ? run_blend(8 << (it % 4), it % 2, (it >> 1) % 2,
+                                   ((it % 2) ? 2 : 1) * (8 << (it % 4)))
+                       : mode == 2
                        /* Steps and phases go together: 1/1024 with a scaled
                         * reference, 1/16 otherwise. */
                        ? run_compound(n, (it % 6) >= 3 ? sub_x % 1024 : cwp_x,

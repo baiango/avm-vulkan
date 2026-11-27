@@ -132,6 +132,32 @@ if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   exit 1
 fi
 
+# Fourth call site: masked (inter-intra / wedge) blending. It needs the slower
+# preset - cpu-used 8 turns inter-intra compound off, so no mask is ever built.
+MASK_ARGS="--limit=5 --good --cpu-used=2 --passes=1 --threads=1"
+if ! "$AVMENC" $MASK_ARGS -o "$work/mask_cpu.ivf" "$work/motion.y4m" \
+    >"$work/mask_cpu.log" 2>&1; then
+  echo "FAIL: CPU masked-compound encode failed"
+  tail -20 "$work/mask_cpu.log"
+  exit 1
+fi
+if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $MASK_ARGS \
+    -o "$work/mask_gpu.ivf" "$work/motion.y4m" >"$work/mask.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/mask.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU masked-compound encode failed"
+  tail -20 "$work/mask.log"
+  exit 1
+fi
+mcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked blends)/\1/p' "$work/mask.log")
+if [ -z "$mcalls" ] || [ "$mcalls" -le 0 ]; then
+  echo "FAIL: the GPU blended no masked blocks"
+  tail -20 "$work/mask.log"
+  exit 1
+fi
+
 hash_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | cut -d' ' -f1
@@ -153,6 +179,10 @@ inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
 echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks)"
 
+mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
+mask_hash=$(hash_of "$work/mask_gpu.ivf")
+echo "mask bitstream : $(wc -c <"$work/mask_gpu.ivf" | tr -d ' ') bytes, md5 $mask_hash ($mcalls masked blends)"
+
 var_hash=$(hash_of "$work/var.ivf")
 echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"
 
@@ -168,5 +198,9 @@ if [ "$inter_cpu_hash" != "$inter_hash" ]; then
   echo "FAIL: inter bitstreams differ ($inter_cpu_hash vs $inter_hash)"
   exit 1
 fi
+if [ "$mask_cpu_hash" != "$mask_hash" ]; then
+  echo "FAIL: masked-compound bitstreams differ ($mask_cpu_hash vs $mask_hash)"
+  exit 1
+fi
 
-echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance and inter paths"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter and masked-compound paths"

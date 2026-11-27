@@ -31,6 +31,7 @@ typedef struct inter_hook_state {
   avm_gpu_inter *inter;
   unsigned long blocks;
   unsigned long compound;
+  unsigned long blends;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -39,8 +40,9 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static void print_stats(void) {
   if (getenv("AV2_GPU_INTER_STATS")) {
     fprintf(stderr,
-            "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound)\n",
-            g_hook.blocks, g_hook.compound);
+            "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
+            "%lu masked blends)\n",
+            g_hook.blocks, g_hook.compound, g_hook.blends);
   }
 }
 
@@ -172,6 +174,35 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     if (rc == 0) {
       g_hook.blocks++;
       if (is_compound) g_hook.compound++;
+      handled = 1;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return handled;
+}
+
+int avm_gpu_hook_blend_a64(uint16_t *dst, int dst_stride,
+                           const uint16_t *src0, int s0_stride,
+                           const uint16_t *src1, int s1_stride,
+                           const uint8_t *mask, int mask_stride, int w, int h,
+                           int subw, int subh, int bd) {
+  if (!dst || !src0 || !src1 || !mask) return 0;
+  if (w <= 0 || h <= 0 || w > HOOK_MAX_DIM * 2 || h > HOOK_MAX_DIM * 2) return 0;
+
+  pthread_mutex_lock(&g_lock);
+  int handled = 0;
+  if (hook_ready_locked()) {
+    char err[AVM_GPU_ERR_LEN];
+    const int brc =
+        avm_gpu_inter_blend_a64(g_hook.ctx, g_hook.inter, src0, s0_stride, src1,
+                                s1_stride, mask, mask_stride, w, h, subw, subh,
+                                bd, dst, dst_stride, err);
+    if (brc != 0 && getenv("AV2_GPU_INTER_DEBUG")) {
+      fprintf(stderr, "avm_gpu: blend fallback %dx%d subw=%d subh=%d: %s\n", w,
+              h, subw, subh, err);
+    }
+    if (brc == 0) {
+      g_hook.blends++;
       handled = 1;
     }
   }

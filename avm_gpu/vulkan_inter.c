@@ -259,6 +259,9 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", w, h);
     return -1;
   }
+  /* A subsampled mask is a full-resolution mask that the kernel boxes down
+   * (2x2, 1x2 or 2x1 samples per output sample, as avm_highbd_blend_a64_mask_c
+   * does), so its stride covers 2x the block width. */
   const int mw = subw ? 2 * w : w;
   const int mh = subh ? 2 * h : h;
   if (mask_stride < mw) {

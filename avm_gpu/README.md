@@ -139,7 +139,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_seam_repro.c` | inter seam at block level: 400 hook-vs-C comparisons over freshly filled planes (unscaled and scaled, 4..64), and a replay of the first failing case to say whether it is deterministic or stale data |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
-| `vulkan_hook_inter.{h,c}` | inter prediction seam: single reference, unscaled, 8-tap subpel, `avm_gpu_hook_inter()` |
+| `vulkan_hook_inter.{h,c}` | inter prediction seam: subpel prediction (scaled and unscaled, compound included) and the masked blend, `avm_gpu_hook_inter()` / `avm_gpu_hook_blend_a64()` |
 | `vulkan_hook_lr.{h,c}` | loop-restoration seam: `avm_gpu_hook_pcwiener()` runs one procunit through the classifier + filter kernels, with the lossless per-block copy mask |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
@@ -369,6 +369,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] compound over a scaled reference: 1/1024 per-pixel phase in the kernel,
       gated against `av2_highbd_convolve_2d_scale_c()` (2 bitdepths x even/uneven
       x 3 scales), and taken by the seam
+- [x] masked (inter-intra / wedge) blend call site: `combine_interintra_highbd()`
+      runs `kernels/compound.comp` when `AV2_GPU_INTER=1` (21,359 blends in the
+      gate at cpu-used 2, bitstream unchanged)
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
       kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
       8-tap), with the encoder bitstream gate on a half-pel motion clip
@@ -398,6 +401,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   inconsistent arguments outright: an unscaled call must carry 1/16 steps, a
   scaled one 1..1024, and the window is refused if it exceeds the block plus its
   border (`h + 2*3 + 3`).
+- Wedge-mask blending is wired for the inter-intra path only; masked compound
+  between two inter predictors (`av2_build_inter_predictors` masked modes) still
+  goes through the C blend. The encoder only builds masks at slower presets
+  (cpu-used 8 turns inter-intra off), which is why the gate uses cpu-used 2.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.

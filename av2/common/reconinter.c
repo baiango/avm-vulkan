@@ -3880,6 +3880,16 @@ static AVM_INLINE void combine_interintra_highbd(
 
       const int subh = 2 * mi_size_high[bsize] == bh;
       const int subw = 2 * mi_size_wide[bsize] == bw;
+#if defined(AVM_GPU_HOOKS)
+      // Optional Vulkan path (avm_gpu/): masked blend on the GPU. Returns 0 and
+      // falls through to the C blend otherwise.
+      if (avm_gpu_hook_blend_a64(comppred8, compstride, intrapred8,
+                                 intrastride, interpred8, interstride, mask,
+                                 block_size_wide[bsize], bw, bh, subw, subh,
+                                 bd)) {
+        return;
+      }
+#endif
       avm_highbd_blend_a64_mask(comppred8, compstride, intrapred8, intrastride,
                                 interpred8, interstride, mask,
                                 block_size_wide[bsize], bw, bh, subw, subh, bd);
@@ -3889,6 +3899,13 @@ static AVM_INLINE void combine_interintra_highbd(
 
   uint8_t mask[MAX_SB_SQUARE];
   build_smooth_interintra_mask(mask, bw, plane_bsize, mode);
+#if defined(AVM_GPU_HOOKS)
+  if (avm_gpu_hook_blend_a64(comppred8, compstride, intrapred8,
+                             intrastride, interpred8, interstride, mask, bw, bw,
+                             bh, 0, 0, bd)) {
+    return;
+  }
+#endif
   avm_highbd_blend_a64_mask(comppred8, compstride, intrapred8, intrastride,
                             interpred8, interstride, mask, bw, bw, bh, 0, 0,
                             bd);

@@ -46,6 +46,18 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                        int do_average, uint16_t *conv_dst, int conv_stride,
                        int fwd_offset, int bck_offset);
 
+/*
+ * Masked blend seam (inter-intra and wedge masks):
+ * avm_highbd_blend_a64_mask(), already gated against the kernel by
+ * avm_gpu_inter_test. Same argument order as the C. Returns 1 when the GPU
+ * blended the block. Inert unless AV2_GPU_INTER=1.
+ */
+int avm_gpu_hook_blend_a64(uint16_t *dst, int dst_stride,
+                           const uint16_t *src0, int s0_stride,
+                           const uint16_t *src1, int s1_stride,
+                           const uint8_t *mask, int mask_stride, int w, int h,
+                           int subw, int subh, int bd);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
