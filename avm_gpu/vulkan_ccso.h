@@ -46,6 +46,27 @@ int avm_gpu_ccso_block(avm_gpu_ctx *ctx, avm_gpu_ccso *ccso,
                        int edge_clf, int bo_only, uint16_t *out,
                        char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Windowed variant for the encode seam: instead of the whole planes it uploads
+ * only the block plus the reach of derive_ccso_sample_pos() - 2 samples on each
+ * side horizontally and 1 row on each side vertically. `src_y`/`dst` point at
+ * the block inside the caller's buffers and x/y are the block's position, which
+ * is how apply_ccso_filter() calls the C. The destination is written through a
+ * scratch buffer, so a block on the plane's last row never touches the row
+ * below it. Blocks closer than 2 columns or 1 row to the left/top edge are
+ * refused (the caller's destination has no padding there).
+ */
+int avm_gpu_ccso_block_window(avm_gpu_ctx *ctx, avm_gpu_ccso *ccso,
+                              const uint16_t *src_y, int src_stride,
+                              uint16_t *dst, int dst_stride, int pic_w,
+                              int pic_h, int x, int y,
+                              const int8_t *offset_buf, int src_loc_0,
+                              int src_loc_1, int y_uv_hscale, int y_uv_vscale,
+                              int thr, int neg_thr, int max_val, int blk_w,
+                              int blk_h, int single_band, int shift_bits,
+                              int edge_clf, int bo_only,
+                              char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

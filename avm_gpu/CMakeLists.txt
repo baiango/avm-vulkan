@@ -223,7 +223,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_itxfm.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_intra.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_deblock.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_cdef.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_cdef.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_ccso.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
@@ -379,6 +380,12 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_ccso_test PRIVATE avm)
   add_test(NAME avm_gpu_ccso_test COMMAND avm_gpu_ccso_test)
   set_tests_properties(avm_gpu_ccso_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  add_executable(avm_gpu_ccso_seam_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_ccso_seam_test.c")
+  target_link_libraries(avm_gpu_ccso_seam_test PRIVATE avm)
+  add_test(NAME avm_gpu_ccso_seam_test COMMAND avm_gpu_ccso_seam_test)
+  set_tests_properties(avm_gpu_ccso_seam_test PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(avm_gpu_warp_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_warp_test.c")

@@ -434,6 +434,71 @@ if [ "$cdef_fail" -ne 0 ]; then
   exit 1
 fi
 
+# Tenth call site: CCSO (av2_apply_ccso_filter_for_row / _for_tile). Only the
+# noisy clip makes the encoder signal CCSO blocks, and the reference is the
+# padded luma plane, so chroma blocks read a subsampled luma window; the first
+# block row and column stay on the C, whose destination has the padding.
+if ! AV2_GPU_CCSO=1 AV2_GPU_CCSO_STATS=1 "$AVMENC" $LR_ARGS \
+    -o "$work/ccso_gpu.ivf" "$work/noise.y4m" >"$work/ccso.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/ccso.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU CCSO encode failed"
+  tail -20 "$work/ccso.log"
+  exit 1
+fi
+if ! grep -q "CCSO hook enabled" "$work/ccso.log"; then
+  echo "FAIL: the Vulkan CCSO hook did not initialise"
+  tail -20 "$work/ccso.log"
+  exit 1
+fi
+cccalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) CCSO blocks on the GPU.*/\1/p' "$work/ccso.log")
+if [ -z "$cccalls" ] || [ "$cccalls" -le 0 ]; then
+  echo "FAIL: the GPU filtered no CCSO block"
+  tail -20 "$work/ccso.log"
+  exit 1
+fi
+echo "ccso bitstream : $(wc -c <"$work/ccso_gpu.ivf" | tr -d ' ') bytes, md5 $(hash_of "$work/ccso_gpu.ivf") ($cccalls blocks)"
+if [ "$(hash_of "$work/ccso_gpu.ivf")" != "$(hash_of "$work/lr_cpu.ivf")" ]; then
+  echo "FAIL: CCSO bitstream differs from the CPU"
+  exit 1
+fi
+if [ -x "$AVMDEC" ]; then
+  ccso_dec_cpu=$("$AVMDEC" --md5 "$work/ccso_gpu.ivf" 2>/dev/null |
+    sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' | head -1)
+  ccso_dec_gpu=$(AV2_GPU_CCSO=1 "$AVMDEC" --md5 "$work/ccso_gpu.ivf" 2>/dev/null |
+    sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' | head -1)
+  if [ -z "$ccso_dec_gpu" ] || [ "$ccso_dec_cpu" != "$ccso_dec_gpu" ]; then
+    echo "FAIL: GPU CCSO decode differs ($ccso_dec_gpu vs $ccso_dec_cpu)"
+    exit 1
+  fi
+  echo "ccso decode    : md5 $ccso_dec_gpu (gpu) / $ccso_dec_cpu (cpu)"
+fi
+
+# The tiled path of apply_ccso_filter() is a second set of call sites; two tile
+# columns is enough to enter it.
+TILE_ARGS="--limit=2 --good --cpu-used=8 --passes=1 --threads=1 --tile-columns=1"
+if ! "$AVMENC" $TILE_ARGS -o "$work/tile_cpu.ivf" "$work/noise.y4m" \
+    >"$work/tile_cpu.log" 2>&1 ||
+    ! AV2_GPU_CCSO=1 AV2_GPU_CCSO_STATS=1 "$AVMENC" $TILE_ARGS \
+    -o "$work/tile_gpu.ivf" "$work/noise.y4m" >"$work/tile.log" 2>&1; then
+  echo "FAIL: tiled CCSO encode failed"
+  tail -20 "$work/tile.log"
+  exit 1
+fi
+tcalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) CCSO blocks on the GPU.*/\1/p' "$work/tile.log")
+if [ -z "$tcalls" ] || [ "$tcalls" -le 0 ]; then
+  echo "FAIL: the tiled CCSO path filtered no block on the GPU"
+  tail -20 "$work/tile.log"
+  exit 1
+fi
+echo "ccso tiled     : $(wc -c <"$work/tile_gpu.ivf" | tr -d ' ') bytes, md5 $(hash_of "$work/tile_gpu.ivf") ($tcalls blocks)"
+if [ "$(hash_of "$work/tile_gpu.ivf")" != "$(hash_of "$work/tile_cpu.ivf")" ]; then
+  echo "FAIL: tiled CCSO bitstream differs from the CPU"
+  exit 1
+fi
+
 cpu_hash=$(hash_of "$work/cpu.ivf")
 gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
@@ -489,4 +554,4 @@ if [ "$mask_cpu_hash" != "$mask_hash" ]; then
   exit 1
 fi
 
-echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration, deblock and CDEF paths"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration, deblock, CDEF and CCSO paths"

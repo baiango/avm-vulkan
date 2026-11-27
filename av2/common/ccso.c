@@ -18,6 +18,10 @@
 
 #include "avm/avm_integer.h"
 #include "av2/common/ccso.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_ccso.h"
+#endif
 #include "av2/common/reconinter.h"
 #include "av2/common/av2_common_int.h"
 
@@ -391,18 +395,37 @@ void av2_apply_ccso_filter_for_row(AV2_COMMON *cm, MACROBLOCKD *xd,
           cm->ccso_info.ccso_bo_only[plane], plane);
     } else {
       if (cm->ccso_info.ccso_bo_only[plane]) {
-        ccso_filter_block_hbd_wo_buf_bo_only(
-            src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height,
-            cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
-            y_uv_hscale, y_uv_vscale, max_val, blk_size_proc, blk_size_proc,
-            is_single_band, shift_bits);
+#if defined(AVM_GPU_HOOKS)
+        if (avm_gpu_hook_ccso(
+                src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height,
+                cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
+                y_uv_hscale, y_uv_vscale, 0, 0, 0, 0, max_val, blk_size_proc,
+                blk_size_proc, is_single_band, shift_bits, 0, 1)) {
+          /* filtered on the GPU */
+        } else
+#endif
+          ccso_filter_block_hbd_wo_buf_bo_only(
+              src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height,
+              cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
+              y_uv_hscale, y_uv_vscale, max_val, blk_size_proc, blk_size_proc,
+              is_single_band, shift_bits);
       } else {
-        ccso_filter_block_hbd_wo_buf(
-            src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height, src_cls,
-            cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
-            y_uv_hscale, y_uv_vscale, thr, neg_thr, src_loc, max_val,
-            blk_size_proc, blk_size_proc, is_single_band, shift_bits, edge_clf,
-            0);
+#if defined(AVM_GPU_HOOKS)
+        if (avm_gpu_hook_ccso(
+                src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height,
+                cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
+                y_uv_hscale, y_uv_vscale, thr, neg_thr, src_loc[0], src_loc[1],
+                max_val, blk_size_proc, blk_size_proc, is_single_band,
+                shift_bits, edge_clf, 0)) {
+          /* filtered on the GPU */
+        } else
+#endif
+          ccso_filter_block_hbd_wo_buf(
+              src_y, dst_yuv, blk_col, blk_row, pic_width, pic_height, src_cls,
+              cm->ccso_info.filter_offset[plane], src_y_stride, dst_stride,
+              y_uv_hscale, y_uv_vscale, thr, neg_thr, src_loc, max_val,
+              blk_size_proc, blk_size_proc, is_single_band, shift_bits,
+              edge_clf, 0);
       }
     }
   }
@@ -545,23 +568,46 @@ void apply_ccso_filter(AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
                       cm->ccso_info.ccso_bo_only[plane], plane);
                 } else {
                   if (cm->ccso_info.ccso_bo_only[plane]) {
-                    ccso_filter_block_hbd_wo_buf_c(
-                        src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
-                        tile_pxl_y + unit_y, tile_width, tile_height, src_cls,
-                        cm->ccso_info.filter_offset[plane],
-                        ccso_ext_tile_stride, dst_stride, y_uv_hscale,
-                        y_uv_vscale, thr, neg_thr, src_loc, max_val,
-                        unit_size_x, unit_size_y, is_single_band, shift_bits,
-                        edge_clf, cm->ccso_info.ccso_bo_only[plane]);
+#if defined(AVM_GPU_HOOKS)
+                    if (avm_gpu_hook_ccso(
+                            src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
+                            tile_pxl_y + unit_y, tile_width, tile_height,
+                            cm->ccso_info.filter_offset[plane],
+                            ccso_ext_tile_stride, dst_stride, y_uv_hscale,
+                            y_uv_vscale, 0, 0, 0, 0, max_val, unit_size_x,
+                            unit_size_y, is_single_band, shift_bits, 0, 1)) {
+                      /* filtered on the GPU */
+                    } else
+#endif
+                      ccso_filter_block_hbd_wo_buf_c(
+                          src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
+                          tile_pxl_y + unit_y, tile_width, tile_height, src_cls,
+                          cm->ccso_info.filter_offset[plane],
+                          ccso_ext_tile_stride, dst_stride, y_uv_hscale,
+                          y_uv_vscale, thr, neg_thr, src_loc, max_val,
+                          unit_size_x, unit_size_y, is_single_band, shift_bits,
+                          edge_clf, cm->ccso_info.ccso_bo_only[plane]);
                   } else {
-                    ccso_filter_block_hbd_wo_buf(
-                        src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
-                        tile_pxl_y + unit_y, tile_width, tile_height, src_cls,
-                        cm->ccso_info.filter_offset[plane],
-                        ccso_ext_tile_stride, dst_stride, y_uv_hscale,
-                        y_uv_vscale, thr, neg_thr, src_loc, max_val,
-                        unit_size_x, unit_size_y, is_single_band, shift_bits,
-                        edge_clf, 0);
+#if defined(AVM_GPU_HOOKS)
+                    if (avm_gpu_hook_ccso(
+                            src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
+                            tile_pxl_y + unit_y, tile_width, tile_height,
+                            cm->ccso_info.filter_offset[plane],
+                            ccso_ext_tile_stride, dst_stride, y_uv_hscale,
+                            y_uv_vscale, thr, neg_thr, src_loc[0], src_loc[1],
+                            max_val, unit_size_x, unit_size_y, is_single_band,
+                            shift_bits, edge_clf, 0)) {
+                      /* filtered on the GPU */
+                    } else
+#endif
+                      ccso_filter_block_hbd_wo_buf(
+                          src_unit_y, dst_unit_yuv, tile_pxl_x + unit_x,
+                          tile_pxl_y + unit_y, tile_width, tile_height, src_cls,
+                          cm->ccso_info.filter_offset[plane],
+                          ccso_ext_tile_stride, dst_stride, y_uv_hscale,
+                          y_uv_vscale, thr, neg_thr, src_loc, max_val,
+                          unit_size_x, unit_size_y, is_single_band, shift_bits,
+                          edge_clf, 0);
                   }
                 }
               }

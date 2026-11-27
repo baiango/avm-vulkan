@@ -115,7 +115,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk; all three with the compound conv buffer + average |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical; whole-plane (`avm_gpu_deblock_generic()`) and the window the seam uploads (`avm_gpu_deblock_window()`) |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants), whole-buffer and windowed by the seam |
-| `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
+| `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT; whole-plane, and the staged window the seam uploads |
 | `pcwiener.{h,c}` | PC-Wiener restoration, both stages: `avm_gpu_pcwiener_classify()` and `avm_gpu_pcwiener_filter()`, host-derived tap geometry |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
@@ -145,6 +145,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair: thresholds, widths, both bitdepths, both orientations, and the windowed entry point |
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
+| `test/avm_gpu_ccso_seam_test.c` | seam gate: the hook against the reference over the encoder's geometry (192-wide padded luma reference, 32x32 units including the frame edges, chroma with a subsampled reference) |
 | `test/avm_gpu_pcwiener_test.c` | end-to-end gate against `apply_pc_wiener_highbd()`: class ids, then the restored plane |
 | `test/avm_gpu_pcwiener_filter_test.c` | filter stage alone against `av2_convolve_symmetric_highbd_c()`, AVM's own filter banks and tap config |
 | `test/avm_gpu_lr_hook_test.c` | seam gate: procunit-sized stripes (64/32/partial) against `apply_pc_wiener_highbd()` |
@@ -216,6 +217,8 @@ Two seams, selected by `AV2_GPU_SAD`:
 | `AV2_GPU_CDEF=1` | `av2/common/cdef_block.c` | every CDEF filter block (`av2_cdef_filter_fb()`) runs one dispatch, uploading only its 2/8-sample border |
 | `AV2_GPU_CDEF_STATS=1` | `avm_gpu/vulkan_hook_cdef.c` | print the number of blocks filtered on the GPU at exit |
 | `AV2_GPU_CDEF_VERIFY=1` | `avm_gpu/vulkan_hook_cdef.c` | run the matching C wrapper on the same input and report every differing sample |
+| `AV2_GPU_CCSO=1` | `av2/common/ccso.c` | every CCSO processing unit runs one dispatch with a staged window (the reference is subsampled for chroma) |
+| `AV2_GPU_CCSO_STATS=1` | `avm_gpu/vulkan_hook_ccso.c` | print the number of blocks filtered on the GPU and declined at the first row/column |
 
 Both entries fall through to the exact CPU SAD when no device initialises, so a
 machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
@@ -400,6 +403,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       when `AV2_GPU_CDEF=1` (windowed upload, 2/8-sample border), with the
       encoder bitstreams at cpu-used 8/4/2 and the decoder md5 unchanged
 - [x] CCSO block pass + parity gate (1008 cases)
+- [x] CCSO call site: `av2_apply_ccso_filter_for_row()` and the tiled path of
+      `apply_ccso_filter()` run a staged window per processing unit when `AV2_GPU_CCSO=1` (the reference is
+      the padded luma plane, subsampled for chroma; the first block row and
+      column stay on the C), gated by `avm_gpu_ccso_seam_test` (2,268 cases) and
+      end to end on the noisy clip (66 blocks, CPU md5, decoder md5)
 - [x] PC-Wiener restoration filter stage + parity gate (2 geometries x 4 filter
       sets x 2 bitdepths against `av2_convolve_symmetric_highbd_c()`)
 - [x] PC-Wiener classification stage + end-to-end gate (class ids and the
