@@ -213,6 +213,7 @@ documentation. This section is the short version.
 | generic deblock (`deblock.comp`) | matches `avm_highbd_lpf_{horizontal,vertical}_generic_c()`, 378 combinations of width/threshold/flags/orientation | `avm_gpu_deblock_test` |
 | CDEF block filter (`cdef.comp`) | matches `av2_cdef_filter_16_{0,1,2,3}_c`, 5760 combinations of direction/strength/damping/shift/variant | `avm_gpu_cdef_test` |
 | CCSO block pass (`ccso.comp`) | matches `ccso_filter_block_hbd_wo_buf_c()`, 1008 combinations of support/classifier/thresholds/bands/block size | `avm_gpu_ccso_test` |
+| PC-Wiener restoration filter (`pcwiener.comp`) | matches `av2_convolve_symmetric_highbd_c()` with AVM's own filter banks, class→filter selector and `wienerns_simd_config_y` tap geometry; 2 geometries (incl. partial 4×4 edge blocks) × 4 filter sets × 2 bitdepths, plane borders untouched | `avm_gpu_pcwiener_test` |
 | encoder integration (batched motion search + variance) | `avmenc` with `AV2_GPU_SAD=1` and with `AV2_GPU_VAR=1` both produce the CPU run's **md5**, and must price blocks; the same gate also runs with the search lookahead disabled | `avm_gpu_encoder_parity`, `avm_gpu_encoder_parity_no_lookahead` |
 
 Both gates compare **every block** against the reference on random planes with

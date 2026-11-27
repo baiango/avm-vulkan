@@ -1,0 +1,77 @@
+#version 450
+// PC-Wiener restoration filter, one invocation per pixel.
+//
+// Mirrors the inner loop of apply_pc_wiener_highbd() (av2/common/restoration.c)
+// in its USE_CONVOLVE_SYM build, i.e. av2_convolve_symmetric_highbd_c(): each
+// 4x4 block carries a class id, the class picks a filter through the filter
+// selector, and every pixel of the block is filtered with that block's
+// origin-symmetric, non-separable tap set plus the unconstrained centre tap.
+//
+// The tap geometry (per-pair (row * stride + col, filter position) and the
+// centre tap's filter position) arrives from the host, which derives it from
+// the NonsepFilterConfig exactly as the C does. Classification - the part that
+// produces the class ids - is not in this kernel; it stays on the host, and the
+// gate feeds it the class ids the reference itself wrote out.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Dgd { uint img[]; };
+layout(std430, binding = 1) readonly buffer Cid { uint cid[]; };
+layout(std430, binding = 2) readonly buffer Sel { uint sel[]; };
+layout(std430, binding = 3) readonly buffer Flt { int flt[]; };
+layout(std430, binding = 4) readonly buffer Geo { ivec2 geo[]; };
+layout(std430, binding = 5) buffer Dst { uint outimg[]; };
+
+layout(push_constant) uniform PC {
+  uint width;       // visible width
+  uint height;      // visible height
+  uint stride;      // dgd row stride, in samples
+  uint dst_stride;  // dst row stride, in samples
+  uint lead_rows;   // rows of border included above the visible origin
+  uint lead_cols;   // columns of border included left of the visible origin
+  uint bd;          // bit depth
+  uint cid_stride;  // class-id plane stride, in 4x4 blocks
+  uint num_sym;     // symmetric tap pairs
+  uint singleton_index;
+  uint prec_bits;
+  uint num_taps;    // taps per filter
+  uint count;       // width * height
+} pc;
+
+void main() {
+  const uint p = gl_GlobalInvocationID.x;
+  if (p >= pc.count) return;
+
+  const int w = int(pc.width);
+  const int r = int(p) / w;
+  const int c = int(p) - r * w;
+
+  // PC_WIENER_BLOCK_SIZE == 4, offsets 0: the filter is chosen per 4x4 block.
+  const int br = (r >> 2) << 2;
+  const int bc = (c >> 2) << 2;
+  const uint cls = cid[uint(br >> 2) * pc.cid_stride + uint(bc >> 2)];
+  const int base = int(sel[cls] * pc.num_taps);
+
+  const int origin = int(pc.lead_rows) * int(pc.stride) + int(pc.lead_cols);
+  const int idx = origin + r * int(pc.stride) + c;
+
+  const int prec = int(pc.prec_bits);
+  const int singleton = (1 << prec) + flt[base + int(pc.singleton_index)];
+  int acc = singleton * int(img[uint(idx)]);
+
+  for (uint k = 0u; k < pc.num_sym; ++k) {
+    const int diff = geo[k].x;
+    const int pos = geo[k].y;
+    // av2_convolve_symmetric_highbd_c() accumulates the pair in 16 bits.
+    int sum = int(img[uint(idx - diff)]) + int(img[uint(idx + diff)]);
+    sum = (sum << 16) >> 16;
+    acc += flt[base + pos] * sum;
+  }
+
+  // ROUND_POWER_OF_TWO_SIGNED(acc, prec)
+  const int rnd = 1 << (prec - 1);
+  const int v = acc < 0 ? -((-acc + rnd) >> prec) : ((acc + rnd) >> prec);
+  const int maxv = (1 << int(pc.bd)) - 1;
+  const int clipped = v < 0 ? 0 : (v > maxv ? maxv : v);
+  outimg[uint(origin + r * int(pc.dst_stride) + c)] = uint(clipped);
+}
