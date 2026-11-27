@@ -26,10 +26,19 @@
 #include "av2/common/filter.h"
 
 #include "avm_gpu/vulkan_gpu.h"
+#include "avm_gpu/vulkan_hook_inter.h"
 #include "avm_gpu/vulkan_inter.h"
 
-/* av2/common/convolve.c; the single-reference prediction path the encoder
- * uses. */
+/* av2/common/convolve.c; the single-reference prediction paths the encoder
+ * uses (unscaled and scaled reference). */
+void av2_highbd_convolve_2d_scale_c(const uint16_t *src, int src_stride,
+                                    uint16_t *dst, int dst_stride, int w, int h,
+                                    const InterpFilterParams *filter_params_x,
+                                    const InterpFilterParams *filter_params_y,
+                                    const int subpel_x_qn,
+                                    const int x_step_qn, const int subpel_y_qn,
+                                    const int y_step_qn,
+                                    ConvolveParams *conv_params, int bd);
 void av2_highbd_convolve_2d_sr_c(const uint16_t *src, int src_stride,
                                  uint16_t *dst, int dst_stride, int w, int h,
                                  const InterpFilterParams *filter_params_x,
@@ -55,6 +64,8 @@ static double now_ms(void) {
 }
 
 int main(void) {
+  /* The encoder seam is inert without the flag; it reads it on first use. */
+  setenv("AV2_GPU_INTER", "1", 1);
   static const int kPos[6][2] = { { 0, 0 },  { 1, 0 }, { 0, 7 },
                                   { 8, 8 },  { 15, 15 }, { 3, 9 } };
   static const int kSizes[5] = { 4, 8, 16, 32, 64 };
@@ -294,6 +305,127 @@ int main(void) {
           printf("sr bd%-2d (%2d,%2d) %-6d %10.3f %10.3f %s\n", bd, kPos[p][0],
                  kPos[p][1], n, 0.0, 0.0, diff ? "MISMATCH" : "ok");
         }
+      }
+    }
+  }
+
+  /* Scaled reference, 1/1024 subpel units and a per-pixel phase:
+   * av2_highbd_convolve_2d_scale_c(). */
+  {
+    InterpFilterParams fp_x;
+    InterpFilterParams fp_y;
+    memset(&fp_x, 0, sizeof(fp_x));
+    memset(&fp_y, 0, sizeof(fp_y));
+    fp_x.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_x.taps = 8;
+    fp_y.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_y.taps = 8;
+    ConvolveParams conv = get_conv_params_no_round(0, 0, NULL, DST_STRIDE, 0, BD);
+    /* 8/9, 15/16, 3/4 and 1/2 scales, with a subpel offset on top. */
+    static const int kStep[4] = { 910, 960, 768, 512 };
+    static const int kSub[4][2] = { { 512, 0 }, { 333, 700 }, { 0, 1023 },
+                                    { 800, 100 } };
+    for (size_t st = 0; st < 4; st++) {
+      for (size_t s = 0; s < 3; s++) {
+        const int n = kSizes[s];
+        const int sx = 16, sy = 12;
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+        av2_highbd_convolve_2d_scale_c(plane + sy * SRC_W + sx, SRC_W, cpu,
+                                       DST_STRIDE, n, n, &fp_x, &fp_y,
+                                       kSub[st][0], kStep[st], kSub[st][1],
+                                       kStep[st], &conv, BD);
+        const int last_bx = ((n - 1) * kStep[st] + kSub[st][0]) >> 10;
+        const int last_by = ((n - 1) * kStep[st] + kSub[st][1]) >> 10;
+        const int rows = 3 + last_by + 5;
+        if (avm_gpu_inter_convolve_scaled_sr(
+                ctx, inter, plane + (sy - 3) * SRC_W + (sx - 3), SRC_W, rows, 3,
+                3, (const int16_t *)av2_sub_pel_filters_8,
+                (const int16_t *)av2_sub_pel_filters_8, kSub[st][0], kStep[st],
+                kSub[st][1], kStep[st], n, n, BD, conv.round_0, conv.round_1,
+                gpu, DST_STRIDE, err) != 0) {
+          fprintf(stderr, "avm_gpu inter scaled sr: %s\n", err);
+          return 1;
+        }
+        int diff = 0;
+        for (int y = 0; y < n; y++) {
+          for (int x = 0; x < n; x++) {
+            if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) {
+              if (diff < 3) {
+                printf("  scale %d subpel(%d,%d) %dx%d (%d,%d): gpu %u != "
+                       "cpu %u\n",
+                       kStep[st], kSub[st][0], kSub[st][1], n, n, x, y,
+                       gpu[y * DST_STRIDE + x], cpu[y * DST_STRIDE + x]);
+              }
+              diff++;
+            }
+          }
+        }
+        failures += diff != 0;
+        printf("scale %-4d (%4d,%4d) %-6d %10.3f %10.3f %s\n", kStep[st],
+               kSub[st][0], kSub[st][1], n, 0.0, 0.0,
+               diff ? "MISMATCH" : "ok");
+      }
+    }
+  }
+
+  /* The encoder seam itself: same weave, but through avm_gpu_hook_inter(),
+   * which builds the window from the block pointer. Both the unscaled and the
+   * scaled branch are compared with the C reference. */
+  {
+    InterpFilterParams fp_x;
+    InterpFilterParams fp_y;
+    memset(&fp_x, 0, sizeof(fp_x));
+    memset(&fp_y, 0, sizeof(fp_y));
+    fp_x.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_x.taps = 8;
+    fp_y.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_y.taps = 8;
+    ConvolveParams conv = get_conv_params_no_round(0, 0, NULL, DST_STRIDE, 0, BD);
+    for (int scaled = 0; scaled <= 1; scaled++) {
+      for (size_t s = 0; s < 3; s++) {
+        const int n = kSizes[s];
+        const int sx = 16, sy = 12;
+        const int sub_x = scaled ? 333 : 7;
+        const int sub_y = scaled ? 700 : 9;
+        const int step = scaled ? 910 : 16;
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+        if (scaled) {
+          av2_highbd_convolve_2d_scale_c(plane + sy * SRC_W + sx, SRC_W, cpu,
+                                         DST_STRIDE, n, n, &fp_x, &fp_y, sub_x,
+                                         step, sub_y, step, &conv, BD);
+        } else {
+          av2_highbd_convolve_2d_sr_c(plane + sy * SRC_W + sx, SRC_W, cpu,
+                                      DST_STRIDE, n, n, &fp_x, &fp_y, sub_x,
+                                      sub_y, &conv, BD);
+        }
+        if (!avm_gpu_hook_inter(plane + sy * SRC_W + sx, SRC_W, gpu, DST_STRIDE,
+                                n, n, BD, (const int16_t *)av2_sub_pel_filters_8,
+                                (const int16_t *)av2_sub_pel_filters_8, 8, 8,
+                                sub_x, sub_y, conv.round_0, conv.round_1, scaled,
+                                step, step)) {
+          printf("  hook declined scaled=%d %dx%d\n", scaled, n, n);
+          failures++;
+          continue;
+        }
+        int diff = 0;
+        for (int y = 0; y < n; y++) {
+          for (int x = 0; x < n; x++) {
+            if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) {
+              if (diff < 3) {
+                printf("  hook scaled=%d %dx%d (%d,%d): gpu %u != cpu %u\n",
+                       scaled, n, n, x, y, gpu[y * DST_STRIDE + x],
+                       cpu[y * DST_STRIDE + x]);
+              }
+              diff++;
+            }
+          }
+        }
+        failures += diff != 0;
+        printf("hook %-6s %-6d %10.3f %10.3f %s\n",
+               scaled ? "scaled" : "unscaled", n, 0.0, 0.0,
+               diff ? "MISMATCH" : "ok");
       }
     }
   }

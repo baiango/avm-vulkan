@@ -30,6 +30,7 @@ layout(push_constant) uniform PC {
   uint round0;
   uint round1;
   uint fvo;     // offset of the vertical filter table in units of 8 taps
+  uint sb;      // subpel position bits: 4 (1/16) or 10 (1/1024, scaled refs)
 } pc;
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
@@ -44,12 +45,14 @@ void main() {
   const int ds = int(pc.dst_stride);
   const int sxp = int(pc.sx);
   const int syp = int(pc.sy);
+  const int sb = int(pc.sb);
+  const int fb = sb - 4;  // filter index = subpel phase >> fb
   const int xq = int(pc.x0) + x * int(pc.x_step);
   const int yq = int(pc.y0) + y * int(pc.y_step);
-  const int base_x = xq >> 4;
-  const int base_y = yq >> 4;
-  const int fh = (xq & 15) * 8;
-  const int fv = int(pc.fvo) + (yq & 15) * 8;
+  const int base_x = xq >> sb;
+  const int base_y = yq >> sb;
+  const int fh = ((xq >> fb) & 15) * 8;
+  const int fv = int(pc.fvo) + ((yq >> fb) & 15) * 8;
 
   const int sr = int(pc.sr);
   const int r0 = int(pc.round0);

@@ -48,7 +48,7 @@ struct avm_gpu_inter {
 
 typedef struct push_constants {
   uint32_t src_stride, dst_stride, sx, sy, w, h, bd, x0, y0, x_step, y_step,
-      sr, round0, round1, fvo;
+      sr, round0, round1, fvo, sb;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -115,7 +115,7 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                          int y0_q4, int x_step_q4, int y_step_q4, int w, int h,
                          int bd, uint16_t *dst, int dst_stride, int sr,
                          int round0, int round1, const int16_t *filter_y,
-                         char err[AVM_GPU_ERR_LEN]) {
+                         int subpel_bits, char err[AVM_GPU_ERR_LEN]) {
   if (!src || !filter || !dst) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
@@ -124,19 +124,20 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
     snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", w, h);
     return -1;
   }
-  if (x0_q4 < 0 || x0_q4 > 15 || y0_q4 < 0 || y0_q4 > 15) {
+  const int smask = (1 << subpel_bits) - 1;
+  if (x0_q4 < 0 || x0_q4 > smask || y0_q4 < 0 || y0_q4 > smask) {
     snprintf(err, AVM_GPU_ERR_LEN, "subpel position out of range");
     return -1;
   }
-  if (x_step_q4 < 1 || x_step_q4 > 64 || y_step_q4 < 1 || y_step_q4 > 64) {
+  if (x_step_q4 < 1 || y_step_q4 < 1) {
     snprintf(err, AVM_GPU_ERR_LEN, "step out of range");
     return -1;
   }
   /* base already contains the pixel offset: the last output pixel starts at
    * ((w - 1) * step + phase) >> 4 and its taps reach +4 past that, so the
    * border grows with the scale factor. */
-  const int last_bx = ((w - 1) * x_step_q4 + x0_q4) >> 4;
-  const int last_by = ((h - 1) * y_step_q4 + y0_q4) >> 4;
+  const int last_bx = ((w - 1) * x_step_q4 + x0_q4) >> subpel_bits;
+  const int last_by = ((h - 1) * y_step_q4 + y0_q4) >> subpel_bits;
   if (sx < 3 || sy < 3 || sx + last_bx + 4 > src_stride ||
       sy + last_by + 4 > src_rows) {
     snprintf(err, AVM_GPU_ERR_LEN,
@@ -191,7 +192,8 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                         (uint32_t)sr,
                         (uint32_t)round0,
                         (uint32_t)round1,
-                        (uint32_t)(filter_y ? INTER_FILTER_ENTRIES : 0) };
+                        (uint32_t)(filter_y ? INTER_FILTER_ENTRIES : 0),
+                        (uint32_t)subpel_bits };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 3, &pc,
@@ -343,7 +345,7 @@ int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                                   int dst_stride, char err[AVM_GPU_ERR_LEN]) {
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter, x0_q4,
                        y0_q4, x_step_q4, y_step_q4, w, h, bd, dst, dst_stride, 0,
-                       0, 0, NULL, err);
+                       0, 0, NULL, 4, err);
 }
 
 int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
@@ -357,5 +359,19 @@ int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
    * the intermediate is 16-bit without the inter-pass clip. */
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
                        subpel_x_qn, subpel_y_qn, 16, 16, w, h, bd, dst,
-                       dst_stride, 1, round0, round1, filter_y, err);
+                       dst_stride, 1, round0, round1, filter_y, 4, err);
+}
+
+int avm_gpu_inter_convolve_scaled_sr(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int x_step_qn, int subpel_y_qn,
+    int y_step_qn, int w, int h, int bd, int round0, int round1, uint16_t *dst,
+    int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  /* av2_highbd_convolve_2d_scale_c() for one reference: subpel positions and
+   * steps in 1/1024 units (SCALE_SUBPEL_BITS), same two-pass rounding as the
+   * unscaled sr path. */
+  return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
+                       subpel_x_qn, subpel_y_qn, x_step_qn, y_step_qn, w, h, bd,
+                       dst, dst_stride, 1, round0, round1, filter_y, 10, err);
 }

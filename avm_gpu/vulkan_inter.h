@@ -60,6 +60,18 @@ int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                               int round1, uint16_t *dst, int dst_stride,
                               char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * av2_highbd_convolve_2d_scale_c() for one reference: subpel positions and
+ * steps in 1/1024 units (SCALE_SUBPEL_BITS), filter rows resolved per pixel,
+ * same rounding as the unscaled sr path.
+ */
+int avm_gpu_inter_convolve_scaled_sr(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int x_step_qn, int subpel_y_qn,
+    int y_step_qn, int w, int h, int bd, int round0, int round1, uint16_t *dst,
+    int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                             const uint16_t *src0, int s0_stride,
                             const uint16_t *src1, int s1_stride,

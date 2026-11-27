@@ -361,8 +361,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
       tx-skip on/off)
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
-      kernel when `AV2_GPU_INTER=1` (single reference, unscaled, 8-tap), with
-      the encoder bitstream gate on a half-pel motion clip
+      kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
+      8-tap), with the encoder bitstream gate on a half-pel motion clip
 - [x] loop-restoration call site: `pc_wiener_stripe_highbd()` runs the kernels
       when `AV2_GPU_LR=1`, gated by `avm_gpu_lr_hook_test` (6 procunit shapes x
       2 bitdepths x tx-skip on/off)
@@ -383,8 +383,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
-  seam covers single-reference unscaled 8-tap prediction; compound, scaled,
-  warped and >8-tap encoder-side filters still run on the CPU.
+  seam covers single-reference 8-tap prediction, scaled and unscaled; compound,
+  warped and >8-tap encoder-side filters still run on the CPU. Nothing in this
+  repo enables frame scaling, so the scaled branch is gated at kernel and seam
+  level (against `av2_highbd_convolve_2d_scale_c()`) but not by a bitstream.
 - Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
   which serves both the encoder and the decoder) and the seam is gated, but no
   end-to-end stream gate exists yet: with the settings in this repo the encoder
