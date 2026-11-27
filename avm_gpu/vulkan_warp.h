@@ -72,6 +72,7 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                             int p_col, int p_row, int p_width, int p_height,
                             int p_stride, int bd, int round_0, int round_1,
                             int ss_x, int ss_y, const int16_t *filter,
+                            const int32_t *box, int use_box,
                             const avm_gpu_warp_compound *cmp,
                             char err[AVM_GPU_ERR_LEN]);
 

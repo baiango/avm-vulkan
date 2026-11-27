@@ -213,8 +213,8 @@ int main(void) {
                                     REF_W, gpu, p_col, p_row, pw, ph,
                                     PRED_STRIDE, BD, cp.round_0, cp.round_1,
                                     kSub[sub][0], kSub[sub][1],
-                                    &av2_ext_warped_filter[0][0], NULL,
-                                    err) != 0) {
+                                    &av2_ext_warped_filter[0][0], NULL, 0,
+                                    NULL, err) != 0) {
           fprintf(stderr, "avm_gpu warp ext: %s\n", err);
           return 1;
         }
@@ -449,7 +449,7 @@ int main(void) {
                 if (avm_gpu_warp_affine_ext(
                         ctx, warp, kMat[m], r, REF_W, REF_H, REF_W, gpu,
                         p_col, p_row, pw, ph, PRED_STRIDE, BD, cg.round_0,
-                        cg.round_1, 0, 0, &av2_ext_warped_filter[0][0],
+                        cg.round_1, 0, 0, &av2_ext_warped_filter[0][0], NULL, 0,
                         &cmp_gpu, err) != 0) {
                   fprintf(stderr, "avm_gpu warp ext compound: %s\n", err);
                   return 1;
@@ -486,6 +486,105 @@ int main(void) {
               printf("  warp compound mat %zu %dx%d avg %d variant %d: %d "
                      "samples\n",
                      m, pw, ph, avg, variant, diff);
+            }
+          }
+        }
+      }
+    }
+    free(ref2);
+  }
+
+  /* Extended-range warp with a warp boundary box (the encoder always sets one
+   * on that path): single reference and compound, clipped boxes. */
+  {
+    static const int kBoxSize[4][2] = { { 4, 4 }, { 8, 8 }, { 12, 8 }, { 16, 16 } };
+    static uint16_t conv_cpu[PRED_STRIDE * REF_H], conv_gpu[PRED_STRIDE * REF_H];
+    static int32_t box[32 * 32 * 4];
+    uint16_t *ref2 = malloc(sizeof(uint16_t) * REF_W * REF_H);
+    if (!ref2) return 1;
+    for (int i = 0; i < REF_W * REF_H; i++) {
+      ref2[i] = (uint16_t)(rnd() & ((1 << BD) - 1));
+    }
+    for (size_t m = 0; m < 3; m++) {
+      for (size_t s = 0; s < 4; s++) {
+        for (int compound = 0; compound < 2; compound++) {
+          for (int avg = 0; avg < 2; avg++) {
+            const int pw = kBoxSize[s][0], ph = kBoxSize[s][1];
+            /* Each 8x8 sub-block gets its own limits: the sub-block's area
+             * moved by a few pixels and clipped, as
+             * av2_get_reference_area_with_padding_single() produces. */
+            for (int by = 0; by < 32; by++) {
+              for (int bx = 0; bx < 32; bx++) {
+                const int i = by * 32 + bx;
+                const int mvx = (int)(rnd() % 17) - 8;
+                const int mvy = (int)(rnd() % 17) - 8;
+                const int x0 = AVMMAX(0, bx * 8 + mvx - 4);
+                const int y0 = AVMMAX(0, by * 8 + mvy - 4);
+                const int x1 = AVMMIN(REF_W, bx * 8 + mvx + 12);
+                const int y1 = AVMMIN(REF_H, by * 8 + mvy + 12);
+                box[i * 4 + 0] = x0;
+                box[i * 4 + 1] = AVMMAX(x0 + 1, x1);
+                box[i * 4 + 2] = y0;
+                box[i * 4 + 3] = AVMMAX(y0 + 1, y1);
+              }
+            }
+            ConvolveParams cc = get_conv_params_no_round(0, 0, conv_cpu,
+                                                         PRED_STRIDE, compound,
+                                                         BD);
+            ConvolveParams cg = get_conv_params_no_round(0, 0, conv_gpu,
+                                                         PRED_STRIDE, compound,
+                                                         BD);
+            if (avg) {
+              cc.fwd_offset = cg.fwd_offset = 11;
+              cc.bck_offset = cg.bck_offset = 5;
+            }
+            avm_gpu_warp_compound cmp_gpu;
+            memset(&cmp_gpu, 0, sizeof(cmp_gpu));
+            cmp_gpu.conv = conv_gpu;
+            cmp_gpu.conv_stride = PRED_STRIDE;
+            cmp_gpu.uneven = avg;
+            cmp_gpu.fwd = cg.fwd_offset;
+            cmp_gpu.bck = cg.bck_offset;
+            memset(conv_cpu, 0, sizeof(conv_cpu));
+            memset(conv_gpu, 0, sizeof(conv_gpu));
+            int diff = 0;
+            const int passes = compound ? 2 : 1;
+            for (int pass = 0; pass < passes; pass++) {
+              const uint16_t *r = pass ? ref2 : ref;
+              cc.do_average = pass;
+              cg.do_average = pass;
+              cmp_gpu.do_average = pass;
+              memset(cpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+              memset(gpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+              av2_ext_highbd_warp_affine_c(
+                  kMat[m], r, REF_W, REF_H, REF_W, cpu, p_col, p_row, pw, ph,
+                  PRED_STRIDE, 0, 0, BD, &cc, 1, (PadBlock *)box);
+              if (avm_gpu_warp_affine_ext(
+                      ctx, warp, kMat[m], r, REF_W, REF_H, REF_W, gpu, p_col,
+                      p_row, pw, ph, PRED_STRIDE, BD, cg.round_0, cg.round_1,
+                      0, 0, &av2_ext_warped_filter[0][0], box, 1,
+                      compound ? &cmp_gpu : NULL, err) != 0) {
+                fprintf(stderr, "avm_gpu warp ext box: %s\n", err);
+                return 1;
+              }
+              for (int y = 0; y < ph; y++) {
+                for (int x = 0; x < pw; x++) {
+                  if (conv_cpu[y * PRED_STRIDE + x] !=
+                      conv_gpu[y * PRED_STRIDE + x]) {
+                    diff++;
+                  }
+                  if (cpu[y * PRED_STRIDE + x] != gpu[y * PRED_STRIDE + x]) {
+                    diff++;
+                  }
+                }
+              }
+            }
+            cases++;
+            failures += diff != 0;
+            if (diff) {
+              printf("  warp ext box mat %zu %dx%d compound %d avg %d: %d "
+                     "samples\n",
+                     m, pw, ph, compound, avg, diff);
             }
           }
         }

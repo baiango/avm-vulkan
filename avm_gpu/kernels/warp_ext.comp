@@ -13,6 +13,8 @@ layout(std430, binding = 1) buffer Pred { uint pred_px[]; };
 layout(std430, binding = 2) readonly buffer ExtFilt { int wf[]; };
 // High-precision compound buffer (only used when compound != 0).
 layout(std430, binding = 3) buffer Conv { uint conv[]; };
+// Warp boundary box: per 8x8 sub-block limits (x0, x1, y0, y1), x1/y1 exclusive.
+layout(std430, binding = 4) readonly buffer Box { ivec4 box[]; };
 
 layout(push_constant) uniform PC {
   uint width;
@@ -40,6 +42,7 @@ layout(push_constant) uniform PC {
   uint uneven;
   int fwd;
   int bck;
+  uint use_box;   // clamp the reads to the chunk's warp boundary box
 } pc;
 
 const int FILTER_BITS = 7;
@@ -48,6 +51,7 @@ const int WARPEDDIFF_PREC_BITS = WARPEDMODEL_PREC_BITS - 6;
 const int EXT_WARP_ROUND_BITS = WARPEDMODEL_PREC_BITS - 6;
 const int EXT_WARP_TAPS = 6;
 const int EXT_WARP_STORAGE_TAPS = 8;
+const int MAX_WARP_BD_SIZE = 32;
 
 int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -110,6 +114,18 @@ void main() {
   const int iy4 = (hy << 16) | int(uint(ly) >> 16);
   const int sy4 = ly & 0xffff;
 
+  /* av2_ext_highbd_warp_affine_c() clamps every read to the chunk's boundary
+   * box; without one it clamps to the reference frame. */
+  const int x_loc = j0 - int(pc.p_col);
+  const int y_loc = i0 - int(pc.p_row);
+  const ivec4 limits = pc.use_box != 0u
+                           ? box[(x_loc >> 3) + ((y_loc >> 3) * MAX_WARP_BD_SIZE)]
+                           : ivec4(0, width, 0, height);
+  const int left = limits.x;
+  const int right = limits.y - 1;
+  const int top = limits.z;
+  const int bottom = limits.w - 1;
+
   const int offs_x = (sx4 + (1 << (EXT_WARP_ROUND_BITS - 1))) >> EXT_WARP_ROUND_BITS;
   const int offs_y = (sy4 + (1 << (WARPEDDIFF_PREC_BITS - 1))) >> WARPEDDIFF_PREC_BITS;
 
@@ -117,12 +133,12 @@ void main() {
 
   // Horizontal pass: k in [-4, 4], l in [-2, 1].
   for (int k = -4; k < 5; ++k) {
-    const int iy = clampi(iy4 + k, 0, height - 1);
+    const int iy = clampi(iy4 + k, top, bottom);
     for (int l = -2; l < 2; ++l) {
       const int ix = ix4 + l - 2;
       int sum = 1 << offset_bits_horiz;
       for (int m = 0; m < EXT_WARP_TAPS; ++m) {
-        const int sample_x = clampi(ix + m, 0, width - 1);
+        const int sample_x = clampi(ix + m, left, right);
         sum += int(ref_px[uint(iy * stride + sample_x)]) *
                wf[offs_x * EXT_WARP_STORAGE_TAPS + m];
       }

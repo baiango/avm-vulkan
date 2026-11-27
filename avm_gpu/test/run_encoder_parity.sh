@@ -126,9 +126,10 @@ if ! grep -q "inter hook enabled" "$work/inter.log"; then
   exit 1
 fi
 icalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) inter prediction blocks.*/\1/p' "$work/inter.log")
-wcalls=$(sed -n 's/.* \([0-9][0-9]*\) warped.*/\1/p' "$work/inter.log")
+wcalls=$(sed -n 's/.*blends, \([0-9][0-9]*\) warped,.*/\1/p' "$work/inter.log")
 fcalls=$(sed -n 's/.* \([0-9][0-9]*\) forward transforms.*/\1/p' "$work/inter.log")
 cwcalls=$(sed -n 's/.* \([0-9][0-9]*\) compound warped,.*/\1/p' "$work/inter.log")
+wcpu=$(sed -n 's/.* \([0-9][0-9]*\) warped C).*/\1/p' "$work/inter.log")
 dcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked compound.*/\1/p' "$work/inter.log")
 if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   echo "FAIL: the GPU inter path predicted no blocks"
@@ -147,6 +148,11 @@ if [ -z "$fcalls" ] || [ "$fcalls" -le 0 ]; then
 fi
 if [ -z "$cwcalls" ] || [ "$cwcalls" -le 0 ]; then
   echo "FAIL: no compound warped block ran on the GPU"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if [ -z "$wcpu" ] || [ "$wcpu" -ne 0 ]; then
+  echo "FAIL: $wcpu warped blocks were left to the CPU"
   tail -20 "$work/inter.log"
   exit 1
 fi
@@ -294,7 +300,7 @@ echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
 inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
-echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped ($cwcalls compound), $fcalls forward transforms, $dcalls masked compound)"
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped ($cwcalls compound, 0 left to the C), $fcalls forward transforms, $dcalls masked compound)"
 
 mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")

@@ -103,7 +103,7 @@ int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_WARP_EXT_SPV_PATH,
-                              "AVM_GPU_WARP_EXT_SPV", 4, 25 * 4, &w->ext_pipe,
+                              "AVM_GPU_WARP_EXT_SPV", 5, 26 * 4, &w->ext_pipe,
                               err) != 0) {
     avm_gpu_warp_destroy(ctx, w);
     return -1;
@@ -250,6 +250,7 @@ typedef struct ext_push_constants {
   uint32_t ss_x, ss_y;
   uint32_t round_1, compound, do_average, conv_stride, uneven;
   int32_t fwd, bck;
+  uint32_t use_box;
 } ext_push_constants;
 
 int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
@@ -258,6 +259,7 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                             int p_col, int p_row, int p_width, int p_height,
                             int p_stride, int bd, int round_0, int round_1,
                             int ss_x, int ss_y, const int16_t *filter,
+                            const int32_t *box, int use_box,
                             const warp_compound *cmp, char err[AVM_GPU_ERR_LEN]) {
   if (!mat || !ref || !pred || !filter) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
@@ -309,7 +311,21 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   for (int i = 0; i < AVM_GPU_WARP_EXT_FILTER_ROWS * 8; i++) fp[i] = filter[i];
 
   if (warp_upload_conv(ctx, w, cmp, p_row + p_height, err) != 0) return -1;
-  const avm_gpu_buf bufs[4] = { w->ref, w->pred, w->ext_filt, w->conv };
+  if (use_box) {
+    if (!box) {
+      snprintf(err, AVM_GPU_ERR_LEN, "boundary box missing");
+      return -1;
+    }
+    if (!w->box.buffer) {
+      if (avm_gpu_buf_create(ctx, 32 * 32 * 4 * sizeof(int32_t), &w->box, err) !=
+          0) {
+        return -1;
+      }
+    }
+    memcpy(w->box.mapped, box, 32 * 32 * 4 * sizeof(int32_t));
+  }
+  const avm_gpu_buf bufs[5] = { w->ref, w->pred,   w->ext_filt,
+                                 w->conv, w->box };
   ext_push_constants pc = { (uint32_t)width,
                             (uint32_t)height,
                             (uint32_t)stride,
@@ -334,10 +350,11 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                             (uint32_t)(cmp ? cmp->conv_stride : 0),
                             (uint32_t)(cmp && cmp->uneven),
                             cmp ? cmp->fwd : 0,
-                            cmp ? cmp->bck : 0 };
+                            cmp ? cmp->bck : 0,
+                            (uint32_t)(use_box ? 1 : 0) };
   const uint32_t gx = (uint32_t)((p_width + 3) / 4);
   const uint32_t gy = (uint32_t)((p_height + 3) / 4);
-  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->ext_pipe, bufs, 4, &pc,
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->ext_pipe, bufs, 5, &pc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 

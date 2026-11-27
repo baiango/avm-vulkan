@@ -45,7 +45,7 @@ typedef struct inter_hook_state {
   unsigned long warped_scaled;
   unsigned long compound_scaled;
   unsigned long warped_compound;
-  unsigned long warped_compound_cpu;
+  unsigned long warped_cpu;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -57,11 +57,10 @@ static void print_stats(void) {
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
             "%lu masked blends, %lu warped, %lu forward transforms, %lu "
             "masked compound, %lu scaled warped, %lu compound warped, %lu "
-            "scaled compound, %lu compound warped C)\n",
+            "scaled compound, %lu warped C)\n",
             g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped,
             g_hook.fwd_txfm, g_hook.d16_blends, g_hook.warped_scaled,
-            g_hook.warped_compound, g_hook.compound_scaled,
-            g_hook.warped_compound_cpu);
+            g_hook.warped_compound, g_hook.compound_scaled, g_hook.warped_cpu);
   }
 }
 
@@ -279,15 +278,15 @@ int avm_gpu_hook_blend_a64_d16(uint16_t *dst, int dst_stride,
   return handled;
 }
 
-int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
-                      int gamma, int delta, int use_affine_filter, int bd,
-                      const uint16_t *ref, int width, int height, int stride,
-                      uint16_t *pred, int p_col, int p_row, int p_width,
-                      int p_height, int p_stride, int ss_x, int ss_y,
-                      int round_0, int round_1, const struct scale_factors *sf,
-                      int use_warp_bd_box, const PadBlock *warp_bd_box,
-                      int is_compound, int do_average, uint16_t *conv_dst,
-                      int conv_stride, int fwd_offset, int bck_offset) {
+static int warp_try(const int32_t wmmat[8], int wmtype, int alpha, int beta,
+                    int gamma, int delta, int use_affine_filter, int bd,
+                    const uint16_t *ref, int width, int height, int stride,
+                    uint16_t *pred, int p_col, int p_row, int p_width,
+                    int p_height, int p_stride, int ss_x, int ss_y, int round_0,
+                    int round_1, const struct scale_factors *sf,
+                    int use_warp_bd_box, const PadBlock *warp_bd_box,
+                    int is_compound, int do_average, uint16_t *conv_dst,
+                    int conv_stride, int fwd_offset, int bck_offset) {
   if (!wmmat || !ref || !pred || p_width <= 0 || p_height <= 0) return 0;
   /* A compound call passes the high-precision buffer and its averaging state
    * to the kernels; a single reference passes NULL. */
@@ -295,21 +294,7 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
   const int scaled = sf != NULL && av2_is_scaled(sf);
   const int use_affine =
       !scaled && use_affine_filter && p_width >= 8 && p_height >= 8;
-  if (scaled) {
-    /* The reference asserts the boundary box on the scaled path. */
-    if (!use_warp_bd_box || !warp_bd_box) return 0;
-  } else if (!use_affine &&
-             (use_warp_bd_box || (p_width & 3) || (p_height & 3))) {
-    /* The unscaled extended-range kernel models no boundary box - the encoder
-     * sets one whenever it takes that path - and handles whole 4x4 chunks
-     * only. */
-    if (is_compound) {
-      pthread_mutex_lock(&g_lock);
-      if (hook_ready_locked()) g_hook.warped_compound_cpu++;
-      pthread_mutex_unlock(&g_lock);
-    }
-    return 0;
-  }
+  if (use_warp_bd_box && !warp_bd_box) return 0;
   if (p_width > 128 || p_height > 128) return 0;
 
   int32_t mat[8];
@@ -352,7 +337,8 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                                       p_width, p_height, p_stride, bd, round_0,
                                       round_1, ss_x, ss_y,
                                       &av2_ext_warped_filter[0][0],
-                                      cmp_ptr, err);
+                                      (const int32_t *)warp_bd_box,
+                                      use_warp_bd_box, cmp_ptr, err);
     if (rc == 0) {
       g_hook.warped++;
       if (scaled) g_hook.warped_scaled++;
@@ -364,6 +350,30 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
     }
   }
   pthread_mutex_unlock(&g_lock);
+  return handled;
+}
+
+int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
+                      int gamma, int delta, int use_affine_filter, int bd,
+                      const uint16_t *ref, int width, int height, int stride,
+                      uint16_t *pred, int p_col, int p_row, int p_width,
+                      int p_height, int p_stride, int ss_x, int ss_y,
+                      int round_0, int round_1, const struct scale_factors *sf,
+                      int use_warp_bd_box, const PadBlock *warp_bd_box,
+                      int is_compound, int do_average, uint16_t *conv_dst,
+                      int conv_stride, int fwd_offset, int bck_offset) {
+  const int handled = warp_try(wmmat, wmtype, alpha, beta, gamma, delta,
+                               use_affine_filter, bd, ref, width, height,
+                               stride, pred, p_col, p_row, p_width, p_height,
+                               p_stride, ss_x, ss_y, round_0, round_1, sf,
+                               use_warp_bd_box, warp_bd_box, is_compound,
+                               do_average, conv_dst, conv_stride, fwd_offset,
+                               bck_offset);
+  if (!handled) {
+    pthread_mutex_lock(&g_lock);
+    if (hook_ready_locked()) g_hook.warped_cpu++;
+    pthread_mutex_unlock(&g_lock);
+  }
   return handled;
 }
 

@@ -114,7 +114,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/compound.comp` | A64 mask blend of two predictors and the d16 masked compound (`avm_highbd_blend_a64_d16_mask_c`), mask subsampling included |
 | `kernels/cwp.comp` | weighted (CWP) compound average, `avm_highbd_cwp_c` |
 | `kernels/warp.comp` | affine projection (64-bit products via `imulExtended`) + 8-tap warp filter |
-| `kernels/warp_ext.comp` | extended-range warp: 4x4 chunks + 6-tap `av2_ext_warped_filter` |
+| `kernels/warp_ext.comp` | extended-range warp: 4x4 chunks + 6-tap `av2_ext_warped_filter`, clamped to the warp boundary box |
 | `kernels/warp_scaled.comp` | scaled-reference warp: 64-bit corner projection, scale-factor rescale, 16-bit sub-pel x/y steps and the per-8x8 boundary box |
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
@@ -417,9 +417,13 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   md5 with 312 / 3,244 compound warps on the GPU, but no gate stream's final
   bitstream depends on a compound-warp prediction - they all lose the RD
   decision - so the stream-level proof there is "unchanged md5 with a non-zero
-  count", not "the result is used". The unscaled extended-range path always
-  carries a boundary box the ext kernel does not model, so those calls (8 at
-  cpu-used 8, 212 at cpu-used 2) still run on the CPU.
+  count", not "the result is used".
+- Every warp path is on the GPU: the extended-range kernel now takes the warp
+  boundary box (the encoder always sets one on that path) and clamps its
+  reference reads to the per-8x8 limits, so the seam declines no warp at all -
+  the stats line's "warped C" is 0 for every gate stream (5,349 warps at
+  cpu-used 8, 89,656 at cpu-used 2, 28,900 in the 16:9 stream, with the
+  compound counts 320 / 3,456 / 1,694).
 - Data model: packed 16-bit storage covers SAD, variance and the forward DCT;
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
