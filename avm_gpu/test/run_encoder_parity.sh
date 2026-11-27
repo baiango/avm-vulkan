@@ -101,7 +101,7 @@ fi
 
 # Third call site: single-reference subpel inter prediction, on a clip whose
 # content moves by a fractional pixel so the subpel filter (not the integer
-# copy path) is what the skin prices.
+# copy path) is what the encoder actually uses.
 python3 "$here/make_motion_clip.py" "$work/motion.y4m"
 INTER_ARGS="--limit=5 --good --cpu-used=8 --passes=1 --threads=1"
 if ! "$AVMENC" $INTER_ARGS -o "$work/motion_cpu.ivf" "$work/motion.y4m" \
