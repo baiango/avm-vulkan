@@ -207,7 +207,8 @@ if ! "$AVMENC" $LR_ARGS -o "$work/lr_cpu.ivf" "$work/noise.y4m" \
   tail -20 "$work/lr_cpu.log"
   exit 1
 fi
-if ! AV2_GPU_LR=1 AV2_GPU_LR_STATS=1 "$AVMENC" $LR_ARGS \
+if ! AV2_GPU_LR=1 AV2_GPU_LR_STATS=1 AV2_GPU_INTRA=1 AV2_GPU_INTRA_STATS=1 \
+    "$AVMENC" $LR_ARGS \
     -o "$work/lr_gpu.ivf" "$work/noise.y4m" >"$work/lr.log" 2>&1; then
   if grep -q "no Vulkan device\|vkCreateInstance" "$work/lr.log"; then
     echo "SKIP: no Vulkan device"
@@ -218,8 +219,14 @@ if ! AV2_GPU_LR=1 AV2_GPU_LR_STATS=1 "$AVMENC" $LR_ARGS \
   exit 1
 fi
 lrcalls=$(sed -n 's/.* \([0-9][0-9]*\) loop-restoration procunits.*/\1/p' "$work/lr.log")
+intracalls=$(sed -n 's/.* \([0-9][0-9]*\) intra blocks on the GPU.*/\1/p' "$work/lr.log")
 if [ -z "$lrcalls" ] || [ "$lrcalls" -le 0 ]; then
   echo "FAIL: the GPU filtered no loop-restoration procunit"
+  tail -20 "$work/lr.log"
+  exit 1
+fi
+if [ -z "$intracalls" ] || [ "$intracalls" -le 0 ]; then
+  echo "FAIL: the GPU predicted no intra block"
   tail -20 "$work/lr.log"
   exit 1
 fi
@@ -315,7 +322,7 @@ echo "mask bitstream : $(wc -c <"$work/mask_gpu.ivf" | tr -d ' ') bytes, md5 $ma
 
 lr_cpu_hash=$(hash_of "$work/lr_cpu.ivf")
 lr_hash=$(hash_of "$work/lr_gpu.ivf")
-echo "lr bitstream   : $(wc -c <"$work/lr_gpu.ivf" | tr -d ' ') bytes, md5 $lr_hash ($lrcalls loop-restoration procunits)"
+echo "lr bitstream   : $(wc -c <"$work/lr_gpu.ivf" | tr -d ' ') bytes, md5 $lr_hash ($lrcalls loop-restoration procunits, $intracalls intra blocks)"
 
 echo "resized streams: ratios$resize_counts (scaled warped blocks), md5$resize_md5s (cpu/gpu)"
 

@@ -253,6 +253,7 @@ Buffer placement used by both seams:
 | `AV2_GPU_ARENA=1` | device-local arena + staging copies (`AV2_GPU_ARENA_MB`, default 64) |
 | `AV2_GPU_ARENA_VERBOSE=1` | report arena size and any slot fallback |
 | `AVM_GPU_PACK16=1` | packed 16-bit upload layout for SAD and variance (the inter seam always packs when the stride is even) |
+| `AV2_GPU_INTRA=1` | `av2_predict_intra_block()` runs the SMOOTH/SMOOTH_V/SMOOTH_H/PAETH predictors and square DC on the GPU |
 
 ### End-to-end gate
 
@@ -358,7 +359,17 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] highbd SAD kernel + parity gate (9 sizes x 128 candidates)
 - [x] variance/SSE kernel + parity gate (3 bitdepths x 9 sizes x 128 candidates)
 - [x] forward DCT 4x4/8x8 kernel + parity gate (2 sizes x 2 residual ranges)
-- [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability, edges)
+- [x] intra prediction kernel + parity gate (10 modes x 5 sizes, availability,
+      edges)
+- [x] intra prediction call site: `av2_build_intra_predictors_high_default()`
+      runs the SMOOTH / SMOOTH_V / SMOOTH_H / PAETH predictors (with the
+      top-left sample and the far edges the builder already filled) and the
+      square DC variants when `AV2_GPU_INTRA=1` (491,431 blocks in the noisy-clip
+      gate, bitstream unchanged). Directional modes, palette, CFL, DIP and MRL
+      stay on the CPU, and so does a rectangular block's DC: AVM's
+      `highbd_dc_predictor_rect()` divides with a reciprocal (`resolve_divisor_32`)
+      that rounds differently from the square `(sum + count/2) / count` the
+      kernel implements.
 - [x] directional intra zones 1-3 + parity gate (90 cases x pixel compare)
 - [x] inverse DCT + ADST + IDTX + FLIPADST + DDT, 4..32, and all 9 64-wide/tall
       sizes + parity gate

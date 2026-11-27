@@ -58,6 +58,22 @@ add_custom_command(
   COMMENT "avm_gpu: variance.comp -> variance.spv"
   VERBATIM)
 add_custom_command(
+  OUTPUT "${AVM_GPU_INTRA_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra.comp" -o
+          "${AVM_GPU_INTRA_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra.comp"
+  COMMENT "avm_gpu: intra.comp -> intra.spv"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_INTRA_DIR_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra_dir.comp" -o
+          "${AVM_GPU_INTRA_DIR_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/intra_dir.comp"
+  COMMENT "avm_gpu: intra_dir.comp -> intra_dir.spv"
+  VERBATIM)
+add_custom_command(
   OUTPUT "${AVM_GPU_ITXFM_SPV}"
   COMMAND "${AVM_GPU_GLSLANG}" -V
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels/itxfm.comp" -o
@@ -204,7 +220,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_var.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_lr.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_inter.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_itxfm.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_itxfm.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_intra.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"

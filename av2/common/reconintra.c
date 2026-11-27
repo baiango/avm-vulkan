@@ -25,6 +25,10 @@
 #include "av2/common/cfl.h"
 #include "av2/common/intra_dip.h"
 #include "av2/common/reconintra.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_intra.h"
+#endif
 #include <av2/encoder/block.h>
 
 enum {
@@ -1684,15 +1688,41 @@ void av2_build_intra_predictors_high_default(
       highbd_dc_predictor_subsampled(dst, dst_stride, n_top_px > 0,
                                      n_left_px > 0, txwpx, txhpx, above_row_1st,
                                      left_col_1st, xd->bd);
-    } else
+    } else {
+#if defined(AVM_GPU_HOOKS)
+      // Optional Vulkan path (avm_gpu/): DC with the same n_top/n_left
+      // availability variant as dc_pred_high[][]. Returns 0 and falls through
+      // to the C predictor otherwise.
+      if (avm_gpu_hook_intra(mode, dst, dst_stride, above_row_1st,
+                             left_col_1st, txwpx, txhpx, xd->bd, n_top_px,
+                             n_left_px)) {
+        if (apply_ibp && ((plane == 0) || (mbmi->uv_mode != UV_CFL_PRED)) &&
+            ((n_left_px > 0) || (n_top_px > 0))) {
+          /* IBP blends its second predictor on top of the DC base. */
+          ibp_dc_pred_high[n_left_px > 0][n_top_px > 0][tx_size](
+              dst, dst_stride, above_row_1st, left_col_1st, xd->bd);
+        }
+        return;
+      }
+#endif
       dc_pred_high[n_left_px > 0][n_top_px > 0][tx_size](
           dst, dst_stride, above_row_1st, left_col_1st, xd->bd);
+    }
     if (apply_ibp && ((plane == 0) || (mbmi->uv_mode != UV_CFL_PRED)) &&
         ((n_left_px > 0) || (n_top_px > 0))) {
       ibp_dc_pred_high[n_left_px > 0][n_top_px > 0][tx_size](
           dst, dst_stride, above_row_1st, left_col_1st, xd->bd);
     }
   } else {
+#if defined(AVM_GPU_HOOKS)
+    // Optional Vulkan path (avm_gpu/): SMOOTH, SMOOTH_V, SMOOTH_H and PAETH,
+    // which read the neighbour arrays built above (top-left and far edges
+    // included). Returns 0 and falls through to the C predictor otherwise.
+    if (avm_gpu_hook_intra(mode, dst, dst_stride, above_row_1st, left_col_1st,
+                           txwpx, txhpx, xd->bd, n_top_px, n_left_px)) {
+      return;
+    }
+#endif
     pred_high[mode][tx_size](dst, dst_stride, above_row_1st, left_col_1st,
                              xd->bd);
   }
