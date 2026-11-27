@@ -22,12 +22,14 @@ layout(push_constant) uniform PC {
   uint ll_neg;
   uint ll_pos;
   uint count;
+  uint step;   // 1 (across the edge) or the stride (along it)
 } pc;
 
 const int WMULT[8] = { 85, 51, 37, 28, 23, 20, 17, 15 };
 const int QMULT[8] = { 32, 25, 19, 19, 18, 18, 17, 17 };
 const int QFIRST[5] = { 45, 43, 40, 35, 32 };
 const int DF_6_THRESH = 4;
+const int DF_8_THRESH = 3;   // avm_dsp/loopfilter.h
 const int FILT_8_THRESH_SHIFT = 3;
 const int DF_Q_THRESH_SHIFT = 4;
 
@@ -86,7 +88,7 @@ int filt_choice(int sIdx, int tIdx, int maxNeg, int maxPos, int qThresh,
   // 3-sample test
   const int sideThresh3 = sideThresh >> FILT_8_THRESH_SHIFT;
   if (sdNeg2 > sideThresh3 || sdPos1 > sideThresh3) mask = -1;
-  if ((sdNeg1 + sdZero) > qThresh * 8) mask = -1;
+  if ((sdNeg1 + sdZero) > qThresh * DF_8_THRESH) mask = -1;
 
   int endDir = (sideThresh * 3) >> 4;
 
@@ -172,15 +174,16 @@ void filt_asym(int sIdx, int widthNeg, int widthPos, int qThresh) {
 
 void main() {
   const int count = int(pc.count);
-  const int st = pitch_();
+  const int st = pitch_();        // delta direction
+  const int step = int(pc.step);  // between the four filtered samples
   const int sIdx = int(pc.base);
-  const int tIdx = sIdx + (count - 1) * st;
+  const int tIdx = sIdx + (count - 1) * step;
 
   const int filtNeg = (int(pc.filt_neg) >> 1) - 1;
   const int fw = filt_choice(sIdx, tIdx, int(pc.filt_neg), int(pc.filt_pos),
                              int(pc.q_thresh), int(pc.side_thresh));
 
   for (int i = 0; i < count; ++i) {
-    filt_asym(sIdx + i * st, min(fw, filtNeg), fw, int(pc.q_thresh));
+    filt_asym(sIdx + i * step, min(fw, filtNeg), fw, int(pc.q_thresh));
   }
 }

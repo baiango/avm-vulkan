@@ -32,7 +32,7 @@ struct avm_gpu_deblock {
 
 typedef struct push_constants {
   uint32_t base, pitch, filt_neg, filt_pos, q_thresh, side_thresh, bd, ll_neg,
-      ll_pos, count;
+      ll_pos, count, step;
 } push_constants;
 
 int avm_gpu_deblock_create(avm_gpu_ctx *ctx, avm_gpu_deblock **out,
@@ -103,7 +103,8 @@ int avm_gpu_deblock_generic(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
                         (uint32_t)bd,
                         (uint32_t)(ll_neg ? 1 : 0),
                         (uint32_t)(ll_pos ? 1 : 0),
-                        4 };
+                        4,
+                        (uint32_t)(vertical ? stride : 1) };
   const int rc =
       avm_gpu_pipeline_dispatch(ctx, db->pipe, bufs, 1, &pc, sizeof(pc), 1, err);
   if (rc != 0) return rc;

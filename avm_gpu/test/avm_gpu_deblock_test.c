@@ -35,10 +35,11 @@ static unsigned int rnd(void) {
 }
 
 int main(void) {
-  static const int kWidths[7][2] = { { 4, 4 },  { 8, 8 },   { 4, 8 },
+  static const int kWidths[8][2] = { { 4, 4 },  { 8, 8 },   { 4, 8 },
                                      { 8, 10 }, { 10, 14 }, { 14, 18 },
-                                     { 0, 4 } };
-  static const int kQ[3] = { 8, 24, 63 };
+                                     { 18, 18 }, { 0, 4 } };
+  /* q = 4 is what the encoder passes on most edges; it used to be missing. */
+  static const int kQ[4] = { 4, 8, 24, 63 };
   static const int kSide[3] = { 4, 16, 40 };
   static const int kLL[3][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 } };
 
@@ -62,21 +63,25 @@ int main(void) {
   if (!plane || !cpu || !gpu) return 1;
 
   const int x = 20, y = 20;
-  int cases = 0, failures = 0;
+  int cases = 0, failures = 0, filtered = 0;
 
   for (size_t w = 0; w < sizeof(kWidths) / sizeof(kWidths[0]); w++) {
-    for (size_t q = 0; q < 3; q++) {
+    for (size_t q = 0; q < 4; q++) {
       for (size_t s = 0; s < 3; s++) {
         for (size_t l = 0; l < 3; l++) {
           for (int vertical = 0; vertical < 2; vertical++) {
-            for (int i = 0; i < SIDE * SIDE; i++) {
-              plane[i] = (uint16_t)(rnd() & 0x3ff);
+            for (int yy = 0; yy < SIDE; yy++) {
+              for (int xx = 0; xx < SIDE; xx++) {
+                const int side = vertical ? (xx < x) : (yy < y);
+                plane[yy * SIDE + xx] =
+                    (uint16_t)(512 + (side ? 0 : 5) + (int)(rnd() % 3));
+              }
             }
             memcpy(cpu, plane, sizeof(uint16_t) * SIDE * SIDE);
             const uint16_t qv = (uint16_t)kQ[q];
             const uint16_t sv = (uint16_t)kSide[s];
             if (vertical) {
-              avm_highbd_lpf_vertical_generic_c(cpu + y * STRIDE + x, 1,
+              avm_highbd_lpf_vertical_generic_c(cpu + y * STRIDE + x, STRIDE,
                                                 kWidths[w][0], kWidths[w][1],
                                                 &qv, &sv, BD, kLL[l][0],
                                                 kLL[l][1]);
@@ -94,11 +99,17 @@ int main(void) {
               return 1;
             }
 
-            int diff = 0;
+            int diff = 0, touched = 0;
             for (int i = 0; i < SIDE * SIDE; i++) {
               if (cpu[i] != gpu[i]) diff++;
+              if (cpu[i] != plane[i]) touched++;
             }
             cases++;
+            /* Random samples make filt_choice() return 0 almost always, so an
+             * earlier revision of this gate passed without filtering anything
+             * (a deliberate kernel control went unnoticed). The counter below
+             * makes a vacuous sweep a failure. */
+            filtered += touched != 0;
             if (diff) {
               failures++;
               if (failures < 6) {
