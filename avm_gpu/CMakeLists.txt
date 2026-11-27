@@ -36,6 +36,7 @@ set(AVM_GPU_CCSO_SPV "${AVM_GPU_SPV_DIR}/ccso.spv")
 set(AVM_GPU_COMPOUND_SPV "${AVM_GPU_SPV_DIR}/compound.spv")
 set(AVM_GPU_WARP_SPV "${AVM_GPU_SPV_DIR}/warp.spv")
 set(AVM_GPU_WARP_EXT_SPV "${AVM_GPU_SPV_DIR}/warp_ext.spv")
+set(AVM_GPU_WARP_SCALED_SPV "${AVM_GPU_SPV_DIR}/warp_scaled.spv")
 set(AVM_GPU_CWP_SPV "${AVM_GPU_SPV_DIR}/cwp.spv")
 set(AVM_GPU_FWD_TXFM_SPV "${AVM_GPU_SPV_DIR}/fwd_txfm.spv")
 set(AVM_GPU_CWPCONV_SPV "${AVM_GPU_SPV_DIR}/cwpconv.spv")
@@ -175,6 +176,14 @@ add_custom_command(
   COMMENT "avm_gpu: warp_ext.comp -> warp_ext.spv"
   VERBATIM)
 add_custom_command(
+  OUTPUT "${AVM_GPU_WARP_SCALED_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/warp_scaled.comp" -o
+          "${AVM_GPU_WARP_SCALED_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/warp_scaled.comp"
+  COMMENT "avm_gpu: warp_scaled.comp -> warp_scaled.spv"
+  VERBATIM)
+add_custom_command(
   OUTPUT "${AVM_GPU_CWP_SPV}"
   COMMAND "${AVM_GPU_GLSLANG}" -V
           "${CMAKE_CURRENT_SOURCE_DIR}/kernels/cwp.comp" -o "${AVM_GPU_CWP_SPV}"
@@ -194,6 +203,7 @@ add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_COMPOUND_SPV}"
                                           "${AVM_GPU_WARP_SPV}"
                                           "${AVM_GPU_WARP_EXT_SPV}"
+                                          "${AVM_GPU_WARP_SCALED_SPV}"
                                           "${AVM_GPU_CWP_SPV}"
                                           "${AVM_GPU_PCWIENER_SPV}"
                                           "${AVM_GPU_PCWCLS_SPV}"
@@ -235,6 +245,7 @@ target_compile_definitions(avm_gpu
                                    AVM_GPU_COMPOUND_SPV_PATH="${AVM_GPU_COMPOUND_SPV}"
                                    AVM_GPU_WARP_SPV_PATH="${AVM_GPU_WARP_SPV}"
                                    AVM_GPU_WARP_EXT_SPV_PATH="${AVM_GPU_WARP_EXT_SPV}"
+                                   AVM_GPU_WARP_SCALED_SPV_PATH="${AVM_GPU_WARP_SCALED_SPV}"
                                    AVM_GPU_CWP_SPV_PATH="${AVM_GPU_CWP_SPV}"
                                    AVM_GPU_PCWIENER_SPV_PATH="${AVM_GPU_PCWIENER_SPV}"
                                    AVM_GPU_PCWCLS_SPV_PATH="${AVM_GPU_PCWCLS_SPV}"

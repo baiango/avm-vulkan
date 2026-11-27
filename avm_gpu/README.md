@@ -101,7 +101,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4..64 with reconstruction add (`avm_gpu_itxfm_add_tx()` for the 64-wide/tall sizes) |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference, and compound A64 blending |
-| `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block |
+| `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
@@ -115,6 +115,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/cwp.comp` | weighted (CWP) compound average, `avm_highbd_cwp_c` |
 | `kernels/warp.comp` | affine projection (64-bit products via `imulExtended`) + 8-tap warp filter |
 | `kernels/warp_ext.comp` | extended-range warp: 4x4 chunks + 6-tap `av2_ext_warped_filter` |
+| `kernels/warp_scaled.comp` | scaled-reference warp: 64-bit corner projection, scale-factor rescale, 16-bit sub-pel x/y steps and the per-8x8 boundary box |
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
@@ -390,7 +391,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       8-tap), with the encoder bitstream gate on a half-pel motion clip
 - [x] loop-restoration call site: `pc_wiener_stripe_highbd()` runs the kernels
       when `AV2_GPU_LR=1`, gated by `avm_gpu_lr_hook_test` (6 procunit shapes x
-      2 bitdepths x tx-skip on/off)
+      2 bitdepths x tx-skip on/off, with the caller's MI-based class/tskip
+      strides) **and end to end**: `run_encoder_parity.sh` encodes the noisy clip
+      `make_noise_clip.py` generates - the only gate clip that makes the encoder
+      pick a restoration type - and requires a non-zero procunit count and the
+      CPU bitstream (150 procunits, md5 f6ab7b6b...)
 - [x] encoder call sites (batched SAD and variance) with a byte-identical
       bitstream gate
 - [x] source-block residency per search and one-step search lookahead
@@ -414,9 +419,19 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   inconsistent arguments outright: an unscaled call must carry 1/16 steps, a
   scaled one 1..1024, and the window is refused if it exceeds the block plus its
   border (`h + 2*3 + 3`).
-- Warped prediction is taken for a single reference without frame scaling and -
-  on the extended-range path - without a boundary box; scaled warped prediction
-  still runs on the CPU.
+- Warped prediction is taken for a single reference: unscaled (affine filter
+  for blocks of at least 8x8, else the extended-range kernel without a boundary
+  box) and **scaled** (`kernels/warp_scaled.comp`, gated against
+  `av2_ext_highbd_warp_affine_scaled_c()` by `avm_gpu_warp_test`). A compound
+  warp writes a high-precision buffer and still runs on the CPU; the stats line
+  counts those (`%lu compound warped C`).
+- Scaled-reference streams are **not** bit-identical yet at every ratio: with
+  `--resize-mode=1` the 12/16 ratio (4:3) reproduces the CPU bitstream with
+  12,452 scaled warped blocks on the GPU, but the 9/16 ratio (16:9) differs -
+  and does so with the scaled warp seam *and* the scaled translation seam
+  declined, so the mismatch is in the scaled 8-tap convolve for steps other
+  than the 910 the seam reproducer uses. Not gated by the encoder parity script
+  for exactly that reason.
 - Wedge-mask blending is wired for both paths: `combine_interintra_highbd()`
   (the A64 blend) and `build_masked_compound_no_round()` (the d16 masked
   compound). The encoder only builds inter-intra masks at slower presets

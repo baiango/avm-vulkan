@@ -15,6 +15,9 @@
 
 #include <stdint.h>
 
+#include "av2/common/blockd.h"
+#include "av2/common/scale.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,11 +75,14 @@ int avm_gpu_hook_blend_a64_d16(uint16_t *dst, int dst_stride,
 
 /*
  * Warped (affine) prediction seam: av2_highbd_warp_plane() for a single
- * reference, unscaled. The warp parameters arrive field by field (wmtype is
- * the TransformationType, so ROTZOOM can be expanded) so this header stays free
- * of av2 types. Picks av2_highbd_warp_affine() or av2_ext_highbd_warp_affine()
- * exactly as that function does (affine filter and blocks of at least 8x8, else
- * the extended-range one, which the kernel only models without a boundary box).
+ * reference. The warp parameters arrive field by field (wmtype is the
+ * TransformationType, so ROTZOOM can be expanded). Unscaled references pick
+ * av2_highbd_warp_affine() or av2_ext_highbd_warp_affine() exactly as that
+ * function does (affine filter and blocks of at least 8x8, else the
+ * extended-range one, which the kernel only models without a boundary box); a
+ * scaled reference takes av2_ext_highbd_warp_affine_scaled_c() with the scale
+ * factors and the boundary box. A compound call writes a high-precision buffer
+ * and stays on the CPU.
  * Returns 1 when the GPU wrote the block. Inert unless AV2_GPU_INTER=1.
  */
 int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
@@ -84,7 +90,9 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                       const uint16_t *ref, int width, int height, int stride,
                       uint16_t *pred, int p_col, int p_row, int p_width,
                       int p_height, int p_stride, int ss_x, int ss_y,
-                      int round_0, int is_scaled, int use_warp_bd_box);
+                      int round_0, const struct scale_factors *sf,
+                      int use_warp_bd_box, const PadBlock *warp_bd_box,
+                      int is_compound);
 
 /*
  * Forward transform seam: fwd_txfm_c()'s DCT2 path, every size up to 64 (a

@@ -162,10 +162,10 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
             dst_stride, inter_pred_params->subsampling_x,
             inter_pred_params->subsampling_y,
             inter_pred_params->conv_params.round_0,
-            inter_pred_params->scale_factors
-                ? av2_is_scaled(inter_pred_params->scale_factors)
-                : 0,
-            inter_pred_params->use_warp_bd_box)) {
+            inter_pred_params->scale_factors,
+            inter_pred_params->use_warp_bd_box,
+            inter_pred_params->warp_bd_box,
+            inter_pred_params->conv_params.is_compound)) {
       return;
     }
 #endif

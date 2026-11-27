@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "av2/common/convolve.h"
+#include "av2/common/scale.h"
 #include "av2/common/warped_motion.h"
 
 /* warped_motion.h declares the dispatch wrapper, not the _c kernel. */
@@ -38,6 +39,14 @@ void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                                   int subsampling_x, int subsampling_y, int bd,
                                   ConvolveParams *conv_params,
                                   int use_warp_bd_box, PadBlock *warp_bd_box);
+
+/* The scaled variant is not a dispatch wrapper; warped_motion.c exports it. */
+void av2_ext_highbd_warp_affine_scaled_c(
+    const int32_t *mat, const uint16_t *ref, int width, int height, int stride,
+    uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
+    int p_stride, int subsampling_x, int subsampling_y, int bd,
+    ConvolveParams *conv_params, const struct scale_factors *sf,
+    int use_warp_bd_box, PadBlock *warp_bd_box);
 
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_warp.h"
@@ -219,6 +228,70 @@ int main(void) {
           if (failures < 8) {
             printf("  warp-ext mat %zu ss %d/%d %dx%d: %d differ\n", m,
                    kSub[sub][0], kSub[sub][1], pw, ph, diff);
+          }
+        }
+      }
+    }
+  }
+
+  /* Scaled (resized-reference) warp: av2_ext_highbd_warp_affine_scaled_c()
+   * with the scale factors of a resized reference and a boundary box. */
+  {
+    static const int kRefDim[3][2] = { { 96, 96 }, { 64, 64 }, { 80, 64 } };
+    static const int kCurDim[3][2] = { { 96, 96 }, { 96, 96 }, { 48, 96 } };
+    static const int kScaleSize[4][2] = {
+      { 4, 4 }, { 8, 8 }, { 8, 4 }, { 16, 16 },
+    };
+    static int32_t box[32 * 32 * 4];
+    for (size_t d = 0; d < 3; d++) {
+      struct scale_factors sf;
+      av2_setup_scale_factors_for_frame(&sf, kRefDim[d][0], kRefDim[d][1],
+                                        kCurDim[d][0], kCurDim[d][1]);
+      const int rw = kRefDim[d][0];
+      const int rh = kRefDim[d][1];
+      for (int i = 0; i < 32 * 32; i++) {
+        box[i * 4 + 0] = 0;
+        box[i * 4 + 1] = rw;
+        box[i * 4 + 2] = 0;
+        box[i * 4 + 3] = rh;
+      }
+      for (size_t m = 0; m < 3; m++) {
+        for (size_t sub = 0; sub < 3; sub++) {
+          for (size_t s = 0; s < 4; s++) {
+            const int pw = kScaleSize[s][0];
+            const int ph = kScaleSize[s][1];
+            memset(cpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+            memset(gpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+            av2_ext_highbd_warp_affine_scaled_c(
+                kMat[m], ref, rw, rh, REF_W, cpu, p_col, p_row, pw, ph,
+                PRED_STRIDE, kSub[sub][0], kSub[sub][1], BD, &cp, &sf, 1,
+                (PadBlock *)box);
+            if (avm_gpu_warp_affine_scaled(
+                    ctx, warp, kMat[m], ref, rw, rh, REF_W, gpu, p_col, p_row,
+                    pw, ph, PRED_STRIDE, BD, cp.round_0, kSub[sub][0],
+                    kSub[sub][1], sf.x_scale_fp, sf.y_scale_fp, sf.x_step_q4,
+                    sf.y_step_q4, box, &av2_ext_warped_filter[0][0], err) !=
+                0) {
+              fprintf(stderr, "avm_gpu warp scaled: %s\n", err);
+              return 1;
+            }
+            int diff = 0;
+            for (int y = 0; y < REF_H; y++) {
+              for (int x = 0; x < PRED_STRIDE; x++) {
+                if (cpu[y * PRED_STRIDE + x] != gpu[y * PRED_STRIDE + x])
+                  diff++;
+              }
+            }
+            cases++;
+            if (diff) {
+              failures++;
+              if (failures < 8) {
+                printf("  warp-scaled ref %dx%d cur %dx%d mat %zu ss %d/%d "
+                       "%dx%d: %d differ\n",
+                       rw, rh, kCurDim[d][0], kCurDim[d][1], m, kSub[sub][0],
+                       kSub[sub][1], pw, ph, diff);
+              }
+            }
           }
         }
       }

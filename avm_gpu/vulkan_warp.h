@@ -58,6 +58,24 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                             int ss_y, const int16_t *filter,
                             char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Scaled (resized-reference) affine prediction, matching
+ * av2_ext_highbd_warp_affine_scaled_c() for the single-prediction case: the
+ * chunk corner is rescaled with x_scale_fp / y_scale_fp (REF_SCALE_SHIFT) and
+ * walked with x_step_q4 / y_step_q4, and every read is clamped to the 8x8
+ * sub-block limits in box (MAX_WARP_BD_SIZE^2 entries of x0, x1, y0, y1).
+ * Blocks are multiples of 4 in neither direction: partial chunks are written.
+ */
+int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
+                               const int32_t mat[6], const uint16_t *ref,
+                               int width, int height, int stride,
+                               uint16_t *pred, int p_col, int p_row,
+                               int p_width, int p_height, int p_stride, int bd,
+                               int round_0, int ss_x, int ss_y, int x_scale_fp,
+                               int y_scale_fp, int x_step_q4, int y_step_q4,
+                               const int32_t *box, const int16_t *filter,
+                               char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

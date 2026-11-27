@@ -1,0 +1,240 @@
+#version 450
+// Scaled (resized-reference) affine prediction, one invocation per 4x4 chunk.
+//
+// Mirrors av2/common/warped_motion.c av2_ext_highbd_warp_affine_scaled_c() for
+// the single-prediction case:
+//   - the 4x4 chunk centre is projected through the affine matrix in 64-bit
+//     (imulExtended: MoltenVK has no shaderInt64) and the top-left corner is
+//     (dst >> ss) - 2 samples back,
+//   - that corner is rescaled into the reference frame with
+//     ROUND_POWER_OF_TWO_SIGNED_64(v * scale_fp, REF_SCALE_SHIFT),
+//   - the horizontal pass walks x with x_step_qn and the vertical pass walks y
+//     with y_step_qn, both from the scale factors (SCALE_SUBPEL_BITS -> 16-bit
+//     sub-pel steps), with a 6-tap av2_ext_warped_filter,
+//   - every reference read and write is clamped to the chunk's warp boundary
+//     box (the reference asserts use_warp_bd_box on this path).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Ref { uint ref_px[]; };
+layout(std430, binding = 1) buffer Pred { uint pred_px[]; };
+layout(std430, binding = 2) readonly buffer ExtFilt { int wf[]; };
+layout(std430, binding = 3) readonly buffer Box { ivec4 box[]; };
+
+layout(push_constant) uniform PC {
+  uint width;
+  uint height;
+  uint stride;
+  uint p_col;
+  uint p_row;
+  uint p_width;
+  uint p_height;
+  uint p_stride;
+  uint bd;
+  uint round_0;
+  int m0;
+  int m1;
+  int m2;
+  int m3;
+  int m4;
+  int m5;
+  uint ss_x;
+  uint ss_y;
+  int x_scale_fp;
+  int y_scale_fp;
+  int x_step_qn;
+  int y_step_qn;
+} pc;
+
+const int FILTER_BITS = 7;
+const int WARPEDMODEL_PREC_BITS = 16;
+const int EXT_WARP_ROUND_BITS = WARPEDMODEL_PREC_BITS - 6;
+const int EXT_WARP_TAPS = 6;
+const int EXT_WARP_STORAGE_TAPS = 8;
+const int REF_SCALE_SHIFT = 14;
+const int MAX_WARP_BD_SIZE = 32;
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// 64-bit product of two 32-bit values as (hi, lo).
+void mul64(int a, int b, out int hi, out int lo) {
+  int h, l;
+  imulExtended(a, b, h, l);
+  hi = h;
+  lo = l;
+}
+
+// (hi, lo) += v, with v sign-extended from 32 bits.
+void add32(inout int hi, inout int lo, int v) {
+  const uint old = uint(lo);
+  const uint nl = old + uint(v);
+  lo = int(nl);
+  hi = hi + (v >> 31) + (nl < old ? 1 : 0);
+}
+
+// (hi, lo) += (ah, al).
+void add64(inout int hi, inout int lo, int ah, int al) {
+  const uint old = uint(lo);
+  const uint nl = old + uint(al);
+  lo = int(nl);
+  hi = hi + ah + (nl < old ? 1 : 0);
+}
+
+// (hi, lo) -= v, with v sign-extended from 32 bits.
+void sub32(inout int hi, inout int lo, int v) {
+  const uint old = uint(lo);
+  const uint nl = old - uint(v);
+  lo = int(nl);
+  hi = hi - (v >> 31) - (nl > old ? 1 : 0);
+}
+
+void neg64(inout int hi, inout int lo) {
+  const uint nl = uint(0) - uint(lo);
+  hi = int(uint(0) - uint(hi) - (lo != 0 ? 1u : 0u));
+  lo = int(nl);
+}
+
+// Arithmetic right shift of (hi, lo) by one bit.
+void shr1(inout int hi, inout int lo) {
+  const uint ul = uint(lo);
+  lo = int((ul >> 1) | (uint(hi) << 31));
+  hi = hi >> 1;
+}
+
+// (hi, lo) * b for a 32-bit b, modulo 2^64.
+void mul64x32(int ah, int al, int b, out int rh, out int rl) {
+  int ph, pl, qh, ql;
+  mul64(al, b, ph, pl);
+  mul64(ah, b, qh, ql);
+  rl = pl;
+  // (ql << 32) touches only the high word, so nothing carries into the low one.
+  rh = ph + ql;
+}
+
+// ROUND_POWER_OF_TWO_SIGNED_64(v, REF_SCALE_SHIFT): round half away from zero.
+void round_shift64(inout int hi, inout int lo) {
+  if (hi < 0) {
+    neg64(hi, lo);
+    add32(hi, lo, 1 << (REF_SCALE_SHIFT - 1));
+    lo = int((uint(lo) >> REF_SCALE_SHIFT) |
+             (uint(hi) << (32 - REF_SCALE_SHIFT)));
+    hi = hi >> REF_SCALE_SHIFT;
+    neg64(hi, lo);
+  } else {
+    add32(hi, lo, 1 << (REF_SCALE_SHIFT - 1));
+    lo = int((uint(lo) >> REF_SCALE_SHIFT) |
+             (uint(hi) << (32 - REF_SCALE_SHIFT)));
+    hi = hi >> REF_SCALE_SHIFT;
+  }
+}
+
+void main() {
+  const int bx = int(gl_WorkGroupID.x);
+  const int by = int(gl_WorkGroupID.y);
+  const int i0 = int(pc.p_row) + by * 4;
+  const int j0 = int(pc.p_col) + bx * 4;
+
+  const int width = int(pc.width);
+  const int height = int(pc.height);
+  const int stride = int(pc.stride);
+  const int bd = int(pc.bd);
+  const int reduce_bits_horiz = int(pc.round_0);
+  const int reduce_bits_vert = 2 * FILTER_BITS - reduce_bits_horiz;
+  const int offset_bits_horiz = bd + FILTER_BITS - 1;
+  const int offset_bits_vert = bd + 2 * FILTER_BITS - reduce_bits_horiz;
+
+  // The chunk's warp boundary box (x1/y1 are exclusive, as in PadBlock).
+  const int x_loc = j0 - int(pc.p_col);
+  const int y_loc = i0 - int(pc.p_row);
+  const ivec4 limits = box[(x_loc >> 3) + ((y_loc >> 3) * MAX_WARP_BD_SIZE)];
+  const int left = limits.x;
+  const int right = limits.y - 1;
+  const int top = limits.z;
+  const int bottom = limits.w - 1;
+
+  const int ss_x = int(pc.ss_x);
+  const int ss_y = int(pc.ss_y);
+  const int src_x = (j0 + 2) << ss_x;
+  const int src_y = (i0 + 2) << ss_y;
+
+  int hx, lx, hy, ly, th, tl;
+  mul64(pc.m2, src_x, hx, lx);
+  mul64(pc.m3, src_y, th, tl);
+  add64(hx, lx, th, tl);
+  add64(hx, lx, pc.m0 >> 31, pc.m0);
+  mul64(pc.m4, src_x, hy, ly);
+  mul64(pc.m5, src_y, th, tl);
+  add64(hy, ly, th, tl);
+  add64(hy, ly, pc.m1 >> 31, pc.m1);
+
+  for (int i = 0; i < ss_x; ++i) shr1(hx, lx);
+  for (int i = 0; i < ss_y; ++i) shr1(hy, ly);
+
+  // Top-left corner of the chunk: the projection is the chunk centre.
+  sub32(hx, lx, 2 << WARPEDMODEL_PREC_BITS);
+  sub32(hy, ly, 2 << WARPEDMODEL_PREC_BITS);
+
+  // Rescale into the reference frame (16-bit sub-pel precision).
+  mul64x32(hx, lx, pc.x_scale_fp, th, tl);
+  round_shift64(th, tl);
+  const int x4_hi = th, x4_lo = tl;
+  mul64x32(hy, ly, pc.y_scale_fp, th, tl);
+  round_shift64(th, tl);
+  const int y4_hi = th, y4_lo = tl;
+
+  const int ix4 = (x4_hi << 16) | int(uint(x4_lo) >> 16);
+  const int sx4 = x4_lo & 0xffff;
+  const int iy4 = (y4_hi << 16) | int(uint(y4_lo) >> 16);
+  const int subpel_y_qn = y4_lo & 0xffff;
+
+  const int x_step_qn = pc.x_step_qn;
+  const int y_step_qn = pc.y_step_qn;
+
+  // Horizontal pass: 4 rows per chunk column, extended by the vertical
+  // filter's reach.
+  const int im_h =
+      (((3 * y_step_qn + subpel_y_qn) >> WARPEDMODEL_PREC_BITS) + EXT_WARP_TAPS);
+  const int init_y = iy4 - 2;  // fo_vert = taps_half - 1
+
+  int im_block[(2 * 4 + EXT_WARP_TAPS) * 4];
+  for (int y = 0; y < im_h; ++y) {
+    const int iy = clampi(init_y + y, top, bottom);
+    for (int x = 0; x < 4; ++x) {
+      const int x_qn = sx4 + x * x_step_qn;
+      const int ix = ix4 + (x_qn >> WARPEDMODEL_PREC_BITS);
+      const int offs_x = ((x_qn & 0xffff) + (1 << (EXT_WARP_ROUND_BITS - 1))) >>
+                         EXT_WARP_ROUND_BITS;
+      int sum = 1 << offset_bits_horiz;
+      for (int m = 0; m < EXT_WARP_TAPS; ++m) {
+        const int sample_x = clampi(ix - 2 + m, left, right);
+        sum += int(ref_px[uint(iy * stride + sample_x)]) *
+               wf[offs_x * EXT_WARP_STORAGE_TAPS + m];
+      }
+      im_block[y * 4 + x] =
+          (sum + (1 << (reduce_bits_horiz - 1))) >> reduce_bits_horiz;
+    }
+  }
+
+  // Vertical pass.
+  const int ncols = min(4, int(pc.p_col) + int(pc.p_width) - j0);
+  const int nrows = min(4, int(pc.p_row) + int(pc.p_height) - i0);
+  const int maxv = (1 << bd) - 1;
+  for (int x = 0; x < ncols; ++x) {
+    for (int y = 0; y < nrows; ++y) {
+      const int y_qn = subpel_y_qn + y * y_step_qn;
+      const int row0 = y_qn >> WARPEDMODEL_PREC_BITS;
+      const int offs_y = ((y_qn & 0xffff) + (1 << (EXT_WARP_ROUND_BITS - 1))) >>
+                         EXT_WARP_ROUND_BITS;
+      int sum = 1 << offset_bits_vert;
+      for (int m = 0; m < EXT_WARP_TAPS; ++m) {
+        sum += im_block[(row0 + m) * 4 + x] *
+               wf[offs_y * EXT_WARP_STORAGE_TAPS + m];
+      }
+      sum = (sum + (1 << (reduce_bits_vert - 1))) >> reduce_bits_vert;
+      const int v = sum - (1 << (bd - 1)) - (1 << bd);
+      const uint idx = uint((i0 - int(pc.p_row) + y) * int(pc.p_stride) +
+                            (j0 - int(pc.p_col) + x));
+      pred_px[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
+    }
+  }
+}

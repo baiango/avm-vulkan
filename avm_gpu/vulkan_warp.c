@@ -24,10 +24,15 @@
 #ifndef AVM_GPU_WARP_EXT_SPV_PATH
 #define AVM_GPU_WARP_EXT_SPV_PATH "warp_ext.spv"
 #endif
+#ifndef AVM_GPU_WARP_SCALED_SPV_PATH
+#define AVM_GPU_WARP_SCALED_SPV_PATH "warp_scaled.spv"
+#endif
 
 struct avm_gpu_warp {
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *ext_pipe;
+  avm_gpu_pipeline *scaled_pipe;
+  avm_gpu_buf box;
   avm_gpu_buf ext_filt;
   avm_gpu_buf ref, pred, filt;
   VkDeviceSize ref_cap, pred_cap;
@@ -63,6 +68,12 @@ int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
     avm_gpu_warp_destroy(ctx, w);
     return -1;
   }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_WARP_SCALED_SPV_PATH,
+                              "AVM_GPU_WARP_SCALED_SPV", 4, 23 * 4,
+                              &w->scaled_pipe, err) != 0) {
+    avm_gpu_warp_destroy(ctx, w);
+    return -1;
+  }
   *out = w;
   return 0;
 }
@@ -71,6 +82,8 @@ void avm_gpu_warp_destroy(avm_gpu_ctx *ctx, avm_gpu_warp *w) {
   if (!w) return;
   avm_gpu_pipeline_destroy(ctx, w->pipe);
   avm_gpu_pipeline_destroy(ctx, w->ext_pipe);
+  avm_gpu_pipeline_destroy(ctx, w->scaled_pipe);
+  avm_gpu_buf_destroy(ctx, &w->box);
   avm_gpu_buf_destroy(ctx, &w->ext_filt);
   avm_gpu_buf_destroy(ctx, &w->ref);
   avm_gpu_buf_destroy(ctx, &w->pred);
@@ -245,6 +258,132 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   const uint32_t gx = (uint32_t)((p_width + 3) / 4);
   const uint32_t gy = (uint32_t)((p_height + 3) / 4);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->ext_pipe, bufs, 3, &pc,
+                                              sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+
+  for (size_t i = 0; i < pred_n; i++) pred[i] = (uint16_t)pp[i];
+  return 0;
+}
+
+typedef struct scaled_push_constants {
+  uint32_t width, height, stride, p_col, p_row, p_width, p_height, p_stride,
+      bd, round_0;
+  int32_t m0, m1, m2, m3, m4, m5;
+  uint32_t ss_x, ss_y;
+  int32_t x_scale_fp, y_scale_fp, x_step_qn, y_step_qn;
+} scaled_push_constants;
+
+/* SCALE_SUBPEL_BITS: the scale factors' 1/16 steps carry into 16-bit sub-pel
+ * positions as x_step_q4 << (WARPEDMODEL_PREC_BITS - SCALE_SUBPEL_BITS). */
+#define AVM_GPU_SCALE_SUBPEL_BITS 10
+
+int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
+                               const int32_t mat[6], const uint16_t *ref,
+                               int width, int height, int stride,
+                               uint16_t *pred, int p_col, int p_row,
+                               int p_width, int p_height, int p_stride, int bd,
+                               int round_0, int ss_x, int ss_y, int x_scale_fp,
+                               int y_scale_fp, int x_step_q4, int y_step_q4,
+                               const int32_t *box, const int16_t *filter,
+                               char err[AVM_GPU_ERR_LEN]) {
+  if (!mat || !ref || !pred || !filter || !box) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (p_width <= 0 || p_height <= 0 || p_width > 128 || p_height > 128) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported warp size %dx%d", p_width,
+             p_height);
+    return -1;
+  }
+  /* x_step_q4 is in 1/1024 units: 128 is a 2x upscale, 4096 a 16x downscale,
+   * the widest ratio valid_ref_frame_size() allows. Above 4096 the horizontal
+   * pass would need more than im_block's (2 * 4 + EXT_WARP_TAPS) rows. */
+  if (x_step_q4 < 64 || y_step_q4 < 64 || x_step_q4 > 4096 ||
+      y_step_q4 > 4096) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported scale steps %d/%d", x_step_q4,
+             y_step_q4);
+    return -1;
+  }
+  if (stride < width || p_stride < p_width) {
+    snprintf(err, AVM_GPU_ERR_LEN, "stride too small");
+    return -1;
+  }
+
+  const size_t ref_n = (size_t)stride * height;
+  const size_t pred_n = (size_t)p_stride * (p_row + p_height);
+  if (ref_n > w->expand_cap) {
+    free(w->expand);
+    w->expand = malloc(ref_n * sizeof(*w->expand));
+    w->expand_cap = w->expand ? ref_n : 0;
+    if (!w->expand) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  if (w->ref_cap < (VkDeviceSize)ref_n * 4) {
+    avm_gpu_buf_destroy(ctx, &w->ref);
+    if (avm_gpu_buf_create(ctx, (VkDeviceSize)ref_n * 4, &w->ref, err) != 0) {
+      return -1;
+    }
+    w->ref_cap = w->ref.size;
+  }
+  if (w->pred_cap < (VkDeviceSize)pred_n * 4) {
+    avm_gpu_buf_destroy(ctx, &w->pred);
+    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pred_n * 4, &w->pred, err) != 0) {
+      return -1;
+    }
+    w->pred_cap = w->pred.size;
+  }
+  /* The boundary box is a MAX_WARP_BD_SIZE^2 grid of 8x8 sub-block limits. */
+  if (!w->ext_filt.buffer) {
+    if (avm_gpu_buf_create(ctx, AVM_GPU_WARP_EXT_FILTER_ROWS * 8 * 4,
+                           &w->ext_filt, err) != 0) {
+      return -1;
+    }
+  }
+  if (!w->box.buffer) {
+    if (avm_gpu_buf_create(ctx, 32 * 32 * 4 * sizeof(int32_t), &w->box, err) !=
+        0) {
+      return -1;
+    }
+  }
+
+  for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
+  memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  uint32_t *pp = w->pred.mapped;
+  for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
+  int32_t *fp = w->ext_filt.mapped;
+  for (int i = 0; i < AVM_GPU_WARP_EXT_FILTER_ROWS * 8; i++) fp[i] = filter[i];
+  memcpy(w->box.mapped, box, 32 * 32 * 4 * sizeof(int32_t));
+
+  const avm_gpu_buf bufs[4] = { w->ref, w->pred, w->ext_filt, w->box };
+  scaled_push_constants pc = {
+    (uint32_t)width,
+    (uint32_t)height,
+    (uint32_t)stride,
+    (uint32_t)p_col,
+    (uint32_t)p_row,
+    (uint32_t)p_width,
+    (uint32_t)p_height,
+    (uint32_t)p_stride,
+    (uint32_t)bd,
+    (uint32_t)round_0,
+    mat[0],
+    mat[1],
+    mat[2],
+    mat[3],
+    mat[4],
+    mat[5],
+    (uint32_t)ss_x,
+    (uint32_t)ss_y,
+    x_scale_fp,
+    y_scale_fp,
+    x_step_q4 << (16 - AVM_GPU_SCALE_SUBPEL_BITS),
+    y_step_q4 << (16 - AVM_GPU_SCALE_SUBPEL_BITS)
+  };
+  const uint32_t gx = (uint32_t)((p_width + 3) / 4);
+  const uint32_t gy = (uint32_t)((p_height + 3) / 4);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->scaled_pipe, bufs, 4, &pc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
