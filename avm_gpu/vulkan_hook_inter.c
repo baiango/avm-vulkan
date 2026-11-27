@@ -95,7 +95,18 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
   /* Compound (two passes over the CWP high-precision buffer) is taken
    * unscaled; the kernel has a path for each filter shape, matching the
    * function the C dispatches to (2D, x only, y only, copy). */
-  if (is_compound && (scaled || !conv_dst)) return 0;
+  if (is_compound && !conv_dst) return 0;
+  /* An unscaled call must carry 1/16 steps: anything else would make the window
+   * arithmetic below (which divides by the subpel bit count) read far outside
+   * the caller's plane. A scaled call's steps are bounded by 1 << 10. */
+  if (scaled) {
+    if (x_step_qn <= 0 || y_step_qn <= 0 || x_step_qn > SCALE_SUBPEL_SHIFTS ||
+        y_step_qn > SCALE_SUBPEL_SHIFTS) {
+      return 0;
+    }
+  } else if (x_step_qn != SUBPEL_SHIFTS || y_step_qn != SUBPEL_SHIFTS) {
+    return 0;
+  }
   /* Only the shapes the encoder reproduces bit-exactly are taken. The copy and
    * x-only CWP paths are kernel-gated against the C (avm_gpu_inter_test) but
    * change the encoder bitstream when the seam takes them, so they stay on the
@@ -126,6 +137,10 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     /* The compound entry point bounds the block by w/h (+4 taps), not by the
      * last base row, so it needs one row more than the sr path. */
     const int rows = last_by + 2 * HOOK_BORDER + (is_compound ? 2 : 1);
+    /* Never hand the kernels a window larger than the block plus its border:
+     * h + 8 covers every tap reach for both the unscaled and the scaled
+     * mapping. */
+    if (rows > h + 2 * HOOK_BORDER + 3) return 0;
     int rc;
     if (is_compound) {
       const int uneven =

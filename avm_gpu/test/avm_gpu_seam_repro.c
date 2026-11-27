@@ -280,7 +280,12 @@ int main(int argc, char **argv) {
     const int cwp_x = sub_x % 16;
     const int expect_decline = mode == 2 && cwp_y == 0; /* never: y >= 1 */
     const int rc = mode == 2
-                       ? run_compound(n, cwp_x, cwp_y, it % 2, 0, 16)
+                       /* Steps and phases go together: 1/1024 with a scaled
+                        * reference, 1/16 otherwise. */
+                       ? run_compound(n, (it % 6) >= 3 ? sub_x % 1024 : cwp_x,
+                                      (it % 6) >= 3 ? sub_y % 1024 : cwp_y,
+                                      it % 2, (it % 6) >= 3,
+                                      (it % 6) >= 3 ? 910 : 16)
                        : run_case(scaled, n, sub_x, sub_y, step);
     if (expect_decline && rc < 0) continue;
     if (rc < 0) {
