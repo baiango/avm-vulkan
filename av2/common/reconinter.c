@@ -141,6 +141,34 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
                  av2_is_valid_scale(inter_pred_params->scale_factors)));
   // TODO(jingning): av2_warp_plane() can be further cleaned up.
   if (inter_pred_params->mode == WARP_PRED) {
+#if defined(AVM_GPU_HOOKS)
+    // Optional Vulkan path (avm_gpu/): affine prediction on the GPU. Returns 0
+    // and falls through to av2_warp_plane() otherwise.
+    if (avm_gpu_hook_warp(
+            &inter_pred_params->warp_params.wmmat[0],
+            inter_pred_params->warp_params.wmtype,
+            inter_pred_params->warp_params.alpha,
+            inter_pred_params->warp_params.beta,
+            inter_pred_params->warp_params.gamma,
+            inter_pred_params->warp_params.delta,
+            inter_pred_params->warp_params.use_affine_filter,
+            inter_pred_params->bit_depth,
+            inter_pred_params->ref_frame_buf.buf0,
+            inter_pred_params->ref_frame_buf.width,
+            inter_pred_params->ref_frame_buf.height,
+            inter_pred_params->ref_frame_buf.stride, dst,
+            inter_pred_params->pix_col, inter_pred_params->pix_row,
+            inter_pred_params->block_width, inter_pred_params->block_height,
+            dst_stride, inter_pred_params->subsampling_x,
+            inter_pred_params->subsampling_y,
+            inter_pred_params->conv_params.round_0,
+            inter_pred_params->scale_factors
+                ? av2_is_scaled(inter_pred_params->scale_factors)
+                : 0,
+            inter_pred_params->use_warp_bd_box)) {
+      return;
+    }
+#endif
     av2_warp_plane(
         &inter_pred_params->warp_params, inter_pred_params->bit_depth,
         inter_pred_params->ref_frame_buf.buf0,

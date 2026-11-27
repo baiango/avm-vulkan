@@ -18,8 +18,11 @@
 #include <string.h>
 
 #include "avm_dsp/avm_filter.h"
+#include "av2/common/mv.h"
+#include "av2/common/warped_motion.h"
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_inter.h"
+#include "avm_gpu/vulkan_warp.h"
 
 #define HOOK_SUBPEL_TAPS 8
 #define HOOK_BORDER 3
@@ -29,9 +32,11 @@ typedef struct inter_hook_state {
   int state; /* 0 = uninitialised, 1 = off, 2 = ready */
   avm_gpu_ctx *ctx;
   avm_gpu_inter *inter;
+  avm_gpu_warp *warp;
   unsigned long blocks;
   unsigned long compound;
   unsigned long blends;
+  unsigned long warped;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -41,8 +46,8 @@ static void print_stats(void) {
   if (getenv("AV2_GPU_INTER_STATS")) {
     fprintf(stderr,
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
-            "%lu masked blends)\n",
-            g_hook.blocks, g_hook.compound, g_hook.blends);
+            "%lu masked blends, %lu warped)\n",
+            g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped);
   }
 }
 
@@ -57,7 +62,8 @@ static int hook_ready_locked(void) {
   }
   char err[AVM_GPU_ERR_LEN];
   if (avm_gpu_ctx_create(&g_hook.ctx, err) != 0 ||
-      avm_gpu_inter_create(g_hook.ctx, &g_hook.inter, err) != 0) {
+      avm_gpu_inter_create(g_hook.ctx, &g_hook.inter, err) != 0 ||
+      avm_gpu_warp_create(g_hook.ctx, &g_hook.warp, err) != 0) {
     fprintf(stderr, "avm_gpu: inter hook disabled (%s)\n", err);
     avm_gpu_ctx_destroy(g_hook.ctx);
     g_hook.ctx = NULL;
@@ -204,6 +210,57 @@ int avm_gpu_hook_blend_a64(uint16_t *dst, int dst_stride,
     if (brc == 0) {
       g_hook.blends++;
       handled = 1;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return handled;
+}
+
+int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
+                      int gamma, int delta, int use_affine_filter, int bd,
+                      const uint16_t *ref, int width, int height, int stride,
+                      uint16_t *pred, int p_col, int p_row, int p_width,
+                      int p_height, int p_stride, int ss_x, int ss_y,
+                      int round_0, int is_scaled, int use_warp_bd_box) {
+  if (!wmmat || !ref || !pred || p_width <= 0 || p_height <= 0) return 0;
+  /* Only what the kernels model: single reference, unscaled, and - for the
+   * extended-range variant - no boundary box. */
+  if (is_scaled) return 0;
+  const int use_affine = use_affine_filter && p_width >= 8 && p_height >= 8;
+  if (!use_affine && (use_warp_bd_box || (p_width & 3) || (p_height & 3))) {
+    return 0;
+  }
+  if (p_width > 128 || p_height > 128) return 0;
+
+  int32_t mat[8];
+  memcpy(mat, wmmat, sizeof(mat));
+  if (wmtype == ROTZOOM) {  /* av2_highbd_warp_plane() expands ROTZOOM */
+    mat[5] = mat[2];
+    mat[4] = -mat[3];
+  }
+
+  pthread_mutex_lock(&g_lock);
+  int handled = 0;
+  if (hook_ready_locked()) {
+    char err[AVM_GPU_ERR_LEN];
+    const int rc =
+        use_affine
+            ? avm_gpu_warp_affine(g_hook.ctx, g_hook.warp, mat, ref, width,
+                                  height, stride, pred, p_col, p_row, p_width,
+                                  p_height, p_stride, bd, round_0, alpha, beta,
+                                  gamma, delta, ss_x, ss_y,
+                                  &av2_warped_filter[0][0], err)
+            : avm_gpu_warp_affine_ext(g_hook.ctx, g_hook.warp, mat, ref, width,
+                                      height, stride, pred, p_col, p_row,
+                                      p_width, p_height, p_stride, bd, round_0,
+                                      ss_x, ss_y, &av2_ext_warped_filter[0][0],
+                                      err);
+    if (rc == 0) {
+      g_hook.warped++;
+      handled = 1;
+    } else if (getenv("AV2_GPU_INTER_DEBUG")) {
+      fprintf(stderr, "avm_gpu: warp fallback %dx%d: %s\n", p_width, p_height,
+              err);
     }
   }
   pthread_mutex_unlock(&g_lock);

@@ -126,8 +126,14 @@ if ! grep -q "inter hook enabled" "$work/inter.log"; then
   exit 1
 fi
 icalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) inter prediction blocks.*/\1/p' "$work/inter.log")
+wcalls=$(sed -n 's/.* \([0-9][0-9]*\) warped.*/\1/p' "$work/inter.log")
 if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   echo "FAIL: the GPU inter path predicted no blocks"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if [ -z "$wcalls" ] || [ "$wcalls" -le 0 ]; then
+  echo "FAIL: the GPU warp path predicted no blocks"
   tail -20 "$work/inter.log"
   exit 1
 fi
@@ -151,7 +157,7 @@ if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $MASK_ARGS \
   tail -20 "$work/mask.log"
   exit 1
 fi
-mcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked blends)/\1/p' "$work/mask.log")
+mcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked blends.*/\1/p' "$work/mask.log")
 if [ -z "$mcalls" ] || [ "$mcalls" -le 0 ]; then
   echo "FAIL: the GPU blended no masked blocks"
   tail -20 "$work/mask.log"
@@ -177,7 +183,7 @@ echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
 inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
-echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks)"
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped)"
 
 mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")
