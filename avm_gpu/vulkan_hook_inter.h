@@ -59,6 +59,18 @@ int avm_gpu_hook_blend_a64(uint16_t *dst, int dst_stride,
                            int subw, int subh, int bd);
 
 /*
+ * Masked compound between two inter predictors:
+ * avm_highbd_blend_a64_d16_mask() with round_offset / round_bits from the
+ * call's ConvolveParams. Same return convention as the blend above.
+ */
+int avm_gpu_hook_blend_a64_d16(uint16_t *dst, int dst_stride,
+                               const uint16_t *src0, int s0_stride,
+                               const uint16_t *src1, int s1_stride,
+                               const uint8_t *mask, int mask_stride, int w,
+                               int h, int subw, int subh, int bd,
+                               int round_offset, int round_bits);
+
+/*
  * Warped (affine) prediction seam: av2_highbd_warp_plane() for a single
  * reference, unscaled. The warp parameters arrive field by field (wmtype is
  * the TransformationType, so ROTZOOM can be expanded) so this header stays free

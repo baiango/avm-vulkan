@@ -1,7 +1,7 @@
 # avm_gpu — Vulkan compute backend for AVM
 
 Status: **M0 complete, kernels growing.** Nine kernel families (`highbd SAD`,
-`highbd variance/SSE`, forward DCT 4x4/8x8, inverse DCT (DCT, ADST, IDTX, FLIPADST and the DDT substitutions,
+`highbd variance/SSE`, forward DCT (folded butterflies, every size up to 64), inverse DCT (DCT, ADST, IDTX, FLIPADST and the DDT substitutions,
 square and rectangular 4..64) with reconstruction add, intra prediction (DC/V/H/DC_LEFT/DC_TOP/DC_128, SMOOTH,
 SMOOTH_V, SMOOTH_H, PAETH and the directional zones 1-3), inter 8-tap subpel convolve (unscaled and
 scaled), compound A64 mask blending, weighted (CWP) compound and affine
@@ -111,7 +111,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
 | `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix, plus the 2x replicate of the 64-wide/tall sizes |
 | `kernels/inter.comp` | 8-tap separable subpel filter, one invocation per pixel |
-| `kernels/compound.comp` | A64 mask blend of two predictors (mask subsampling included) |
+| `kernels/compound.comp` | A64 mask blend of two predictors and the d16 masked compound (`avm_highbd_blend_a64_d16_mask_c`), mask subsampling included |
 | `kernels/cwp.comp` | weighted (CWP) compound average, `avm_highbd_cwp_c` |
 | `kernels/warp.comp` | affine projection (64-bit products via `imulExtended`) + 8-tap warp filter |
 | `kernels/warp_ext.comp` | extended-range warp: 4x4 chunks + 6-tap `av2_ext_warped_filter` |
@@ -140,7 +140,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_seam_repro.c` | inter seam at block level: 400 hook-vs-C comparisons over freshly filled planes (unscaled and scaled, 4..64), and a replay of the first failing case to say whether it is deterministic or stale data |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
-| `vulkan_hook_inter.{h,c}` | inter prediction seam: subpel prediction (scaled and unscaled, compound included), the masked blend and affine prediction, `avm_gpu_hook_inter()` / `avm_gpu_hook_blend_a64()` / `avm_gpu_hook_warp()` |
+| `vulkan_hook_inter.{h,c}` | inter prediction seam: subpel prediction (scaled and unscaled, compound included), the masked blend, the d16 masked compound and affine prediction, `avm_gpu_hook_inter()` / `avm_gpu_hook_blend_a64()` / `avm_gpu_hook_blend_a64_d16()` / `avm_gpu_hook_warp()` |
 | `vulkan_hook_lr.{h,c}` | loop-restoration seam: `avm_gpu_hook_pcwiener()` runs one procunit through the classifier + filter kernels, with the lossless per-block copy mask |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
@@ -380,6 +380,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] masked (inter-intra / wedge) blend call site: `combine_interintra_highbd()`
       runs `kernels/compound.comp` when `AV2_GPU_INTER=1` (21,359 blends in the
       gate at cpu-used 2, bitstream unchanged)
+- [x] masked compound between two inter predictors call site:
+      `build_masked_compound_no_round()` runs the d16 mode of
+      `kernels/compound.comp` (`avm_highbd_blend_a64_d16_mask_c`, compound
+      rounding and clip included) when `AV2_GPU_INTER=1` (4,433 / 9,828 / 29,740
+      blocks at cpu-used 8 / 4 / 2, bitstreams unchanged)
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
       kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
       8-tap), with the encoder bitstream gate on a half-pel motion clip
@@ -412,10 +417,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Warped prediction is taken for a single reference without frame scaling and -
   on the extended-range path - without a boundary box; scaled warped prediction
   still runs on the CPU.
-- Wedge-mask blending is wired for the inter-intra path only; masked compound
-  between two inter predictors (`av2_build_inter_predictors` masked modes) still
-  goes through the C blend. The encoder only builds masks at slower presets
-  (cpu-used 8 turns inter-intra off), which is why the gate uses cpu-used 2.
+- Wedge-mask blending is wired for both paths: `combine_interintra_highbd()`
+  (the A64 blend) and `build_masked_compound_no_round()` (the d16 masked
+  compound). The encoder only builds inter-intra masks at slower presets
+  (cpu-used 8 turns inter-intra off), which is why that part of the gate uses
+  cpu-used 2; the inter-inter compound is built at every preset.
 - The forward transform seam covers DCT_DCT at every size up to 64x64; the
   64-length axes are box-downsampled exactly as the reference does (the upload
   bound has to include the extra line the downsample reads - a one-line host

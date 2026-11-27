@@ -128,6 +128,7 @@ fi
 icalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) inter prediction blocks.*/\1/p' "$work/inter.log")
 wcalls=$(sed -n 's/.* \([0-9][0-9]*\) warped.*/\1/p' "$work/inter.log")
 fcalls=$(sed -n 's/.* \([0-9][0-9]*\) forward transforms.*/\1/p' "$work/inter.log")
+dcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked compound.*/\1/p' "$work/inter.log")
 if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   echo "FAIL: the GPU inter path predicted no blocks"
   tail -20 "$work/inter.log"
@@ -140,6 +141,11 @@ if [ -z "$wcalls" ] || [ "$wcalls" -le 0 ]; then
 fi
 if [ -z "$fcalls" ] || [ "$fcalls" -le 0 ]; then
   echo "FAIL: the GPU forward transform ran on no blocks"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if [ -z "$dcalls" ] || [ "$dcalls" -le 0 ]; then
+  echo "FAIL: the GPU ran no masked inter-inter compound"
   tail -20 "$work/inter.log"
   exit 1
 fi
@@ -189,7 +195,7 @@ echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
 inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
-echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped, $fcalls forward transforms)"
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped, $fcalls forward transforms, $dcalls masked compound)"
 
 mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")

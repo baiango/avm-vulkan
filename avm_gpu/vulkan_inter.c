@@ -93,7 +93,7 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_COMPOUND_SPV_PATH,
-                              "AVM_GPU_COMPOUND_SPV", 4, 10 * 4,
+                              "AVM_GPU_COMPOUND_SPV", 4, 12 * 4,
                               &in->blend_pipe, err) != 0) {
     avm_gpu_inter_destroy(ctx, in);
     return -1;
@@ -242,7 +242,9 @@ int avm_gpu_inter_convolve(avm_gpu_ctx *ctx, avm_gpu_inter *in,
 
 typedef struct blend_pc {
   uint32_t s0_stride, s1_stride, dst_stride, mask_stride, w, h, subw, subh, bd,
-      pad;
+      mode;
+  int32_t round_offset;
+  uint32_t round_bits;
 } blend_pc;
 
 int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
@@ -293,7 +295,7 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                   (uint32_t)dst_stride, (uint32_t)mask_stride,
                   (uint32_t)w,         (uint32_t)h,
                   (uint32_t)(subw ? 1 : 0), (uint32_t)(subh ? 1 : 0),
-                  (uint32_t)bd,        0 };
+                  (uint32_t)bd,        0, 0, 0 };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->blend_pipe, bufs, 4, &pc,
@@ -506,6 +508,79 @@ int avm_gpu_inter_cwp_convolve(
   if (!(conv_index == 0 && do_average == 0)) {
     const uint32_t *res_dst = in->cwpconv_dst.mapped;
     for (size_t i = 0; i < dst_n; i++) dst[i] = (uint16_t)res_dst[i];
+  }
+  return 0;
+}
+
+int avm_gpu_inter_blend_a64_d16(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                                const uint16_t *src0, int s0_stride,
+                                const uint16_t *src1, int s1_stride,
+                                const uint8_t *mask, int mask_stride, int w,
+                                int h, int subw, int subh, int bd,
+                                int round_offset, int round_bits, uint16_t *dst,
+                                int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  if (!src0 || !src1 || !mask || !dst) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (w <= 0 || h <= 0 || w > 64 || h > 64) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported block size %dx%d", w, h);
+    return -1;
+  }
+  if (round_bits < 1 || round_bits > 24) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported round_bits %d", round_bits);
+    return -1;
+  }
+  const int mw = subw ? 2 * w : w;
+  const int mh = subh ? 2 * h : h;
+  if (mask_stride < mw) {
+    snprintf(err, AVM_GPU_ERR_LEN, "mask stride too small");
+    return -1;
+  }
+
+  const size_t s0_n = (size_t)s0_stride * h;
+  const size_t s1_n = (size_t)s1_stride * h;
+  const size_t mk_n = (size_t)mask_stride * mh;
+  const size_t dst_n = (size_t)dst_stride * h;
+
+  if (ensure_buf(ctx, &in->s0, &in->s0_cap, (VkDeviceSize)s0_n * 4, err) ||
+      ensure_buf(ctx, &in->s1, &in->s1_cap, (VkDeviceSize)s1_n * 4, err) ||
+      ensure_buf(ctx, &in->mask, &in->mask_cap, (VkDeviceSize)mk_n * 4, err) ||
+      ensure_buf(ctx, &in->bdst, &in->bdst_cap, (VkDeviceSize)dst_n * 4, err)) {
+    return -1;
+  }
+
+  uint32_t *p0 = in->s0.mapped;
+  uint32_t *p1 = in->s1.mapped;
+  for (size_t i = 0; i < s0_n; i++) p0[i] = src0[i];
+  for (size_t i = 0; i < s1_n; i++) p1[i] = src1[i];
+  uint32_t *pm = in->mask.mapped;
+  for (size_t i = 0; i < mk_n; i++) pm[i] = mask[i];
+
+  const avm_gpu_buf bufs[4] = { in->s0, in->s1, in->mask, in->bdst };
+  blend_pc pc = { (uint32_t)s0_stride,
+                  (uint32_t)s1_stride,
+                  (uint32_t)dst_stride,
+                  (uint32_t)mask_stride,
+                  (uint32_t)w,
+                  (uint32_t)h,
+                  (uint32_t)(subw ? 1 : 0),
+                  (uint32_t)(subh ? 1 : 0),
+                  (uint32_t)bd,
+                  1,
+                  (int32_t)round_offset,
+                  (uint32_t)round_bits };
+  const uint32_t gx = (uint32_t)((w + 7) / 8);
+  const uint32_t gy = (uint32_t)((h + 7) / 8);
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->blend_pipe, bufs, 4, &pc,
+                                              sizeof(pc), gx, gy, err);
+  if (rc != 0) return rc;
+
+  const uint32_t *res = in->bdst.mapped;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
+    }
   }
   return 0;
 }

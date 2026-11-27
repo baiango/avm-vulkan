@@ -1358,6 +1358,24 @@ static AVM_INLINE void build_masked_compound_no_round(
                       : inter_pred_params->subsampling_x;
   const uint8_t *mask = av2_get_compound_type_mask(comp_data, sb_type);
   const int mask_stride = block_size_wide[sb_type];
+#if defined(AVM_GPU_HOOKS)
+  // Optional Vulkan path (avm_gpu/): masked compound on the GPU. Returns 0 and
+  // falls through to the C blend otherwise.
+  {
+    const ConvolveParams *const conv = &inter_pred_params->conv_params;
+    const int offset_bits =
+        inter_pred_params->bit_depth + 2 * FILTER_BITS - conv->round_0;
+    const int round_offset = (1 << (offset_bits - conv->round_1)) +
+                             (1 << (offset_bits - conv->round_1 - 1));
+    const int round_bits = 2 * FILTER_BITS - conv->round_0 - conv->round_1;
+    if (avm_gpu_hook_blend_a64_d16(dst, dst_stride, src0, src0_stride, src1,
+                                   src1_stride, mask, mask_stride, w, h, ssx,
+                                   ssy, inter_pred_params->bit_depth,
+                                   round_offset, round_bits)) {
+      return;
+    }
+  }
+#endif
   avm_highbd_blend_a64_d16_mask(dst, dst_stride, src0, src0_stride, src1,
                                 src1_stride, mask, mask_stride, w, h, ssx, ssy,
                                 &inter_pred_params->conv_params,

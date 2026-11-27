@@ -1,10 +1,17 @@
 #version 450
-// Compound inter prediction: A64 mask blend of two predictors, one
-// invocation per output pixel.
+// Compound prediction blending, one invocation per output pixel.
 //
-// Mirrors avm_dsp/blend_a64_mask.c avm_highbd_blend_a64_mask_c():
+// mode 0 mirrors avm_dsp/blend_a64_mask.c avm_highbd_blend_a64_mask_c()
+// (inter-intra and the encoder's inter-inter blend):
 //   m = mask (optionally averaged from 2x2, 1x2 or 2x1 mask samples)
 //   dst = ROUND_POWER_OF_TWO(m * src0 + (64 - m) * src1, 6)
+//
+// mode 1 mirrors avm_highbd_blend_a64_d16_mask_c() (the decoder's inter-inter
+// masked compound, reconinter.c build_masked_compound_no_round()):
+//   m   = same mask averaging
+//   res = (m * src0 + (64 - m) * src1) >> 6          (16-bit sources)
+//   res -= round_offset
+//   dst = min(negative_to_zero(ROUND_POWER_OF_TWO(res, round_bits)), sat)
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -23,7 +30,9 @@ layout(push_constant) uniform PC {
   uint subw;
   uint subh;
   uint bd;
-  uint pad;
+  uint mode;          // 0 = A64 blend, 1 = d16 masked compound
+  int round_offset;   // mode 1
+  uint round_bits;    // mode 1
 } pc;
 
 int at(uint idx) { return int(mk[idx]); }
@@ -49,6 +58,18 @@ void main() {
 
   const int a = int(s0[uint(y) * pc.s0_stride + uint(x)]);
   const int b = int(s1[uint(y) * pc.s1_stride + uint(x)]);
+  const uint idx = uint(y) * pc.dst_stride + uint(x);
   /* AVM_BLEND_A64: mask 64 means src0, mask 0 means src1. */
-  d[uint(y) * pc.dst_stride + uint(x)] = uint((m * a + (64 - m) * b + 32) >> 6);
+  const int blended = m * a + (64 - m) * b;
+
+  if (pc.mode == 0u) {
+    d[idx] = uint((blended + 32) >> 6);
+  } else {
+    const int res = (blended >> 6) - pc.round_offset;
+    const int rb = int(pc.round_bits);
+    const int rounded = (res + (1 << (rb - 1))) >> rb;
+    const int v = rounded < 0 ? 0 : rounded;
+    const int sat = (1 << int(pc.bd)) - 1;
+    d[idx] = uint(v > sat ? sat : v);
+  }
 }

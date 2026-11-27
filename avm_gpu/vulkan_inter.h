@@ -98,6 +98,20 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                             int dst_stride, char err[AVM_GPU_ERR_LEN]);
 
 /*
+ * Masked compound between two inter predictors, matching
+ * avm_highbd_blend_a64_d16_mask_c(): 16-bit intermediate sources, the same
+ * mask subsampling as above, then res -= round_offset,
+ * ROUND_POWER_OF_TWO(res, round_bits) and a clip to bd bits.
+ */
+int avm_gpu_inter_blend_a64_d16(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
+                                const uint16_t *src0, int s0_stride,
+                                const uint16_t *src1, int s1_stride,
+                                const uint8_t *mask, int mask_stride, int w,
+                                int h, int subw, int subh, int bd,
+                                int round_offset, int round_bits, uint16_t *dst,
+                                int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
+/*
  * Weighted (CWP) compound: comp = ROUND_POWER_OF_TWO(pred * bck_offset +
  * ref * fwd_offset, 4), matching avm_highbd_cwp_c().
  */

@@ -40,6 +40,7 @@ typedef struct inter_hook_state {
   unsigned long blends;
   unsigned long warped;
   unsigned long fwd_txfm;
+  unsigned long d16_blends;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -49,9 +50,10 @@ static void print_stats(void) {
   if (getenv("AV2_GPU_INTER_STATS")) {
     fprintf(stderr,
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
-            "%lu masked blends, %lu warped, %lu forward transforms)\n",
+            "%lu masked blends, %lu warped, %lu forward transforms, %lu "
+            "masked compound)\n",
             g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped,
-            g_hook.fwd_txfm);
+            g_hook.fwd_txfm, g_hook.d16_blends);
   }
 }
 
@@ -217,6 +219,36 @@ int avm_gpu_hook_blend_a64(uint16_t *dst, int dst_stride,
     }
     if (brc == 0) {
       g_hook.blends++;
+      handled = 1;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return handled;
+}
+
+int avm_gpu_hook_blend_a64_d16(uint16_t *dst, int dst_stride,
+                               const uint16_t *src0, int s0_stride,
+                               const uint16_t *src1, int s1_stride,
+                               const uint8_t *mask, int mask_stride, int w,
+                               int h, int subw, int subh, int bd,
+                               int round_offset, int round_bits) {
+  if (!dst || !src0 || !src1 || !mask) return 0;
+  if (w <= 0 || h <= 0 || w > HOOK_MAX_DIM * 2 || h > HOOK_MAX_DIM * 2) return 0;
+
+  pthread_mutex_lock(&g_lock);
+  int handled = 0;
+  if (hook_ready_locked()) {
+    char err[AVM_GPU_ERR_LEN];
+    const int brc = avm_gpu_inter_blend_a64_d16(
+        g_hook.ctx, g_hook.inter, src0, s0_stride, src1, s1_stride, mask,
+        mask_stride, w, h, subw, subh, bd, round_offset, round_bits, dst,
+        dst_stride, err);
+    if (brc != 0 && getenv("AV2_GPU_INTER_DEBUG")) {
+      fprintf(stderr, "avm_gpu: d16 blend fallback %dx%d subw=%d subh=%d: %s\n",
+              w, h, subw, subh, err);
+    }
+    if (brc == 0) {
+      g_hook.d16_blends++;
       handled = 1;
     }
   }

@@ -236,6 +236,48 @@ static int run_blend(int n, int subw, int subh, int mask_stride) {
   return diff;
 }
 
+/* Masked compound between two inter predictors: the seam against
+ * avm_highbd_blend_a64_d16_mask(), including the compound rounding and clip. */
+static int run_blend_d16(int n, int subw, int subh, int mask_stride) {
+  static uint16_t l0[2 * SRC_W * SRC_H], l1[2 * SRC_W * SRC_H];
+  static uint16_t d_cpu[2 * SRC_W * SRC_H], d_gpu[2 * SRC_W * SRC_H];
+  static uint8_t mask[4 * SRC_W * SRC_H];
+  const int stride = SRC_W;
+  /* CONV_BUF_TYPE range for the compound intermediate at this bit depth. */
+  const int imax = 1 << (BD + FILTER_BITS - ROUND0_BITS + 2);
+  for (int i = 0; i < SRC_W * SRC_H; i++) {
+    l0[i] = (uint16_t)(rnd() % (unsigned)imax);
+    l1[i] = (uint16_t)(rnd() % (unsigned)imax);
+    d_cpu[i] = 0;
+    d_gpu[i] = 0;
+  }
+  for (int i = 0; i < 4 * SRC_W * SRC_H; i++) mask[i] = (uint8_t)(rnd() & 63);
+
+  ConvolveParams conv = get_conv_params_no_round(0, 0, NULL, DST_STRIDE, 1, BD);
+  const int offset_bits = BD + 2 * FILTER_BITS - conv.round_0;
+  const int round_offset = (1 << (offset_bits - conv.round_1)) +
+                           (1 << (offset_bits - conv.round_1 - 1));
+  const int round_bits = 2 * FILTER_BITS - conv.round_0 - conv.round_1;
+  avm_highbd_blend_a64_d16_mask_c(d_cpu, stride, l0, stride, l1, stride, mask,
+                                  mask_stride, n, n, subw, subh, &conv, BD);
+  if (!avm_gpu_hook_blend_a64_d16(d_gpu, stride, l0, stride, l1, stride, mask,
+                                  mask_stride, n, n, subw, subh, BD,
+                                  round_offset, round_bits)) {
+    return -1;
+  }
+  int diff = 0;
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      if (d_cpu[y * stride + x] != d_gpu[y * stride + x]) diff++;
+    }
+  }
+  if (diff) {
+    printf("  d16 blend n=%d subw=%d subh=%d: %d samples\n", n, subw, subh,
+           diff);
+  }
+  return diff;
+}
+
 static int run_case(int scaled, int n, int sub_x, int sub_y, int step) {
   const InterpFilterParams fp_x = { (const int16_t *)av2_sub_pel_filters_8, 8 };
   const InterpFilterParams fp_y = { (const int16_t *)av2_sub_pel_filters_8, 8 };
@@ -282,6 +324,37 @@ static int run_case(int scaled, int n, int sub_x, int sub_y, int step) {
   return diff;
 }
 
+/* One mode of the rotation, keyed by the iteration so a failing case can be
+ * replayed: 0 unscaled, 1 scaled, 2 compound, 3 blend, 4 d16 masked compound. */
+static int run_mode(int it) {
+  const int mode = it % 5;
+  const int scaled = mode == 1;
+  const int n = 4 << (it % 5); /* 4, 8, 16, 32, 64 */
+  const int step = scaled ? 910 : 16;
+  const int sub_x = scaled ? (int)(rnd() % 1024) : (int)(rnd() % 16);
+  const int sub_y = scaled ? (int)(rnd() % 1024) : (int)(rnd() % 16);
+  for (int i = 0; i < SRC_W * SRC_H; i++) plane[i] = (uint16_t)(rnd() & 0x3ff);
+
+  const int cwp_y = (sub_y % 15) + 1; /* 1..15: the seam needs a y phase */
+  const int cwp_x = sub_x % 16;
+  if (mode == 3) {
+    return run_blend(8 << (it % 4), it % 2, (it >> 1) % 2,
+                     ((it % 2) ? 2 : 1) * (8 << (it % 4)));
+  }
+  if (mode == 4) {
+    return run_blend_d16(8 << (it % 4), it % 2, (it >> 1) % 2,
+                         ((it % 2) ? 2 : 1) * (8 << (it % 4)));
+  }
+  if (mode == 2) {
+    /* Steps and phases go together: 1/1024 with a scaled reference, 1/16
+     * otherwise. */
+    return run_compound(n, (it % 6) >= 3 ? sub_x % 1024 : cwp_x,
+                        (it % 6) >= 3 ? sub_y % 1024 : cwp_y, it % 2,
+                        (it % 6) >= 3, (it % 6) >= 3 ? 910 : 16);
+  }
+  return run_case(scaled, n, sub_x, sub_y, step);
+}
+
 int main(int argc, char **argv) {
   const int iters = argc > 1 ? atoi(argv[1]) : 4000;
   char err[AVM_GPU_ERR_LEN];
@@ -301,32 +374,7 @@ int main(int argc, char **argv) {
   int first_declined_it = -1;
   const int verbose = getenv("SEAM_VERBOSE") != NULL;
   for (int it = 0; it < iters; it++) {
-    const int mode = it % 4;   /* 0 unscaled, 1 scaled, 2 compound */
-    const int scaled = mode == 1;
-    const int n = 4 << (it % 5); /* 4, 8, 16, 32, 64 */
-    const int step = scaled ? 910 : 16;
-    const int sub_x = scaled ? (int)(rnd() % 1024) : (int)(rnd() % 16);
-    const int sub_y = scaled ? (int)(rnd() % 1024) : (int)(rnd() % 16);
-    for (int i = 0; i < SRC_W * SRC_H; i++) plane[i] = (uint16_t)(rnd() & 0x3ff);
-
-    /* The seam takes compound only for the CWP y-only and 2D shapes; the copy
-     * and x-only paths are kernel-gated but not taken in the encoder context,
-     * so a compound case with a zero y phase is expected to be declined. */
-    const int cwp_y = (sub_y % 15) + 1;   /* 1..15: the seam needs a y phase */
-    const int cwp_x = sub_x % 16;
-    const int expect_decline = mode == 2 && cwp_y == 0; /* never: y >= 1 */
-    const int rc = mode == 3
-                       ? run_blend(8 << (it % 4), it % 2, (it >> 1) % 2,
-                                   ((it % 2) ? 2 : 1) * (8 << (it % 4)))
-                       : mode == 2
-                       /* Steps and phases go together: 1/1024 with a scaled
-                        * reference, 1/16 otherwise. */
-                       ? run_compound(n, (it % 6) >= 3 ? sub_x % 1024 : cwp_x,
-                                      (it % 6) >= 3 ? sub_y % 1024 : cwp_y,
-                                      it % 2, (it % 6) >= 3,
-                                      (it % 6) >= 3 ? 910 : 16)
-                       : run_case(scaled, n, sub_x, sub_y, step);
-    if (expect_decline && rc < 0) continue;
+    const int rc = run_mode(it);
     if (rc < 0) {
       /* A decline is not a pass: it would let a window that is too small look
        * like agreement, which is exactly how an earlier revision hid. */
@@ -335,12 +383,12 @@ int main(int argc, char **argv) {
       continue;
     }
     if (rc > 0) {
-      printf("FIRST FAILURE: it=%d scaled=%d n=%d subpel=(%d,%d) step=%d\n", it,
-             scaled, n, sub_x, sub_y, step);
-      printf("replaying the same case 50 times:\n");
+      printf("FIRST FAILURE: it=%d (mode %d, %dx%d)\n", it, it % 5,
+             4 << (it % 5), 4 << (it % 5));
+      printf("replaying the same case %d times:\n", 50);
       int fails = 0;
       for (int r = 0; r < 50; r++) {
-        if (run_case(scaled, n, sub_x, sub_y, step) != 0) fails++;
+        if (run_mode(it) != 0) fails++;
       }
       printf("  %d of 50 replays failed -> %s\n", fails,
              fails == 50 ? "DETERMINISTIC (an index/window bug)"
