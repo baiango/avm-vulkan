@@ -23,6 +23,11 @@ extern "C" {
 
 typedef struct avm_gpu_txfm avm_gpu_txfm;
 
+typedef struct avm_gpu_txfm_pos {
+  uint32_t resi_off;  /* residual sample offset */
+  uint32_t coef_off;  /* coefficient offset  */
+} avm_gpu_txfm_pos;
+
 int avm_gpu_txfm_create(avm_gpu_ctx *ctx, avm_gpu_txfm **out,
                         char err[AVM_GPU_ERR_LEN]);
 void avm_gpu_txfm_destroy(avm_gpu_ctx *ctx, avm_gpu_txfm *txfm);
@@ -39,6 +44,19 @@ int avm_gpu_txfm_set_source(avm_gpu_ctx *ctx, avm_gpu_txfm *txfm,
  * coeffs receives n * size * size coefficients, row-major per block, and is
  * bit-identical to avm_fdct4x4_c (size 4) or avm_highbd_fdct8x8_c (size 8).
  */
+/*
+ * Forward 2D DCT2 transform mirroring fwd_txfm_c()'s folded butterflies:
+ * tx_w/tx_h are the transform size (4..64; a 64-length axis is box-downsampled
+ * first), shift1/shift2 are fwd_tx_shift[tx], mat_w/mat_h are
+ * tx_kernel_dct2_size{tx}[FWD_TXFM]. pos holds one (residual sample offset,
+ * coefficient offset) per block.
+ */
+int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
+                     int diff_stride, const avm_gpu_txfm_pos *pos, int n,
+                     int tx_w, int tx_h, int shift1, int shift2,
+                     const int *mat_w, const int *mat_h, int32_t *coeff,
+                     char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_txfm_fdct(avm_gpu_ctx *ctx, avm_gpu_txfm *txfm,
                       const uint32_t *offsets, int n, int size,
                       int32_t *coeffs, char err[AVM_GPU_ERR_LEN]);

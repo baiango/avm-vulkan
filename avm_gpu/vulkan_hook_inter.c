@@ -22,6 +22,7 @@
 #include "av2/common/warped_motion.h"
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_inter.h"
+#include "avm_gpu/vulkan_txfm.h"
 #include "avm_gpu/vulkan_warp.h"
 
 #define HOOK_SUBPEL_TAPS 8
@@ -33,10 +34,12 @@ typedef struct inter_hook_state {
   avm_gpu_ctx *ctx;
   avm_gpu_inter *inter;
   avm_gpu_warp *warp;
+  avm_gpu_txfm *txfm;
   unsigned long blocks;
   unsigned long compound;
   unsigned long blends;
   unsigned long warped;
+  unsigned long fwd_txfm;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -46,8 +49,9 @@ static void print_stats(void) {
   if (getenv("AV2_GPU_INTER_STATS")) {
     fprintf(stderr,
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
-            "%lu masked blends, %lu warped)\n",
-            g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped);
+            "%lu masked blends, %lu warped, %lu forward transforms)\n",
+            g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped,
+            g_hook.fwd_txfm);
   }
 }
 
@@ -61,9 +65,13 @@ static int hook_ready_locked(void) {
     return 0;
   }
   char err[AVM_GPU_ERR_LEN];
+  const char *txf = getenv("AV2_GPU_FWD_TXFM");
+  const int want_txfm = txf && *txf && strcmp(txf, "0") != 0;
+  (void)want_txfm;
   if (avm_gpu_ctx_create(&g_hook.ctx, err) != 0 ||
       avm_gpu_inter_create(g_hook.ctx, &g_hook.inter, err) != 0 ||
-      avm_gpu_warp_create(g_hook.ctx, &g_hook.warp, err) != 0) {
+      avm_gpu_warp_create(g_hook.ctx, &g_hook.warp, err) != 0 ||
+      avm_gpu_txfm_create(g_hook.ctx, &g_hook.txfm, err) != 0) {
     fprintf(stderr, "avm_gpu: inter hook disabled (%s)\n", err);
     avm_gpu_ctx_destroy(g_hook.ctx);
     g_hook.ctx = NULL;
@@ -261,6 +269,28 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
     } else if (getenv("AV2_GPU_INTER_DEBUG")) {
       fprintf(stderr, "avm_gpu: warp fallback %dx%d: %s\n", p_width, p_height,
               err);
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return handled;
+}
+
+int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
+                          int tx_w, int tx_h, int shift1, int shift2,
+                          const int *mat_w, const int *mat_h) {
+  if (!resi || !coeff || !mat_w || !mat_h) return 0;
+  if (tx_w < 4 || tx_h < 4 || tx_w > 32 || tx_h > 32) return 0;
+
+  pthread_mutex_lock(&g_lock);
+  int handled = 0;
+  if (hook_ready_locked()) {
+    char err[AVM_GPU_ERR_LEN];
+    const avm_gpu_txfm_pos pos = { 0, 0 };
+    if (avm_gpu_txfm_fwd(g_hook.ctx, g_hook.txfm, resi, diff_stride, &pos, 1,
+                         tx_w, tx_h, shift1, shift2, mat_w, mat_h, coeff,
+                         err) == 0) {
+      g_hook.fwd_txfm++;
+      handled = 1;
     }
   }
   pthread_mutex_unlock(&g_lock);

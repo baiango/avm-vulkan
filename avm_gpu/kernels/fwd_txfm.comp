@@ -1,0 +1,149 @@
+#version 450
+// Forward 1D/2D transform, one invocation per block.
+//
+// Mirrors fwd_txfm_c() (av2/encoder/hybrid_fwd_txfm.c) exactly for the DCT2
+// kernels - which are *folded butterflies*, not plain matrix products:
+//
+//   a[k] = x[k] + x[n-1-k],  b[k] = x[k] - x[n-1-k]          (k < n/2)
+//   V_0 = a, D_0 = b;  fold V_j -> V_{j+1} (sums), D_{j+1} (diffs)
+//   D_j feeds the outputs 2^j + t * 2^(j+1)   (t < len(D_j))
+//   and the last V (length 2) feeds outputs 0 and n/2
+//
+// each with (sum + (1 << (shift - 1))) >> shift (arithmetic), rows taken from
+// tx_kernel_dct2_sizeN[FWD_TXFM]. The 2D driver is the reference's:
+// residual box-downsampled by two on any 64-length axis, pass one transforms
+// the columns with the height matrix (stride-h layout), pass two the rows with
+// the width matrix, and an odd log2(w)+log2(h) scales by NewSqrt2.
+
+layout(local_size_x = 32) in;
+
+layout(std430, binding = 0) readonly buffer Resi { uint r[]; };
+layout(std430, binding = 1) writeonly buffer Coef { int c[]; };
+layout(std430, binding = 2) readonly buffer Pos { uvec2 pos[]; };
+layout(std430, binding = 3) readonly buffer Mat { int m[]; };
+
+layout(push_constant) uniform PC {
+  uint w;            // downsampled width
+  uint h;            // downsampled height
+  uint diff_stride;  // residual stride, in samples
+  uint ds_x;
+  uint ds_y;
+  uint shift1;
+  uint shift2;
+  uint sqrt2;
+  uint count;
+  uint mat_h_off;    // offset of the height matrix (width matrix is at 0)
+} pc;
+
+const int NEW_SQRT2 = 5793;  // NewSqrt2 with NewSqrt2Bits = 12
+const int NEW_SQRT2_BITS = 12;
+
+int rshift(int v, int n) { return n > 0 ? (v + (1 << (n - 1))) >> n : v; }
+
+// One folded-butterfly pass: reads src[i * in_stride] for i < n, writes
+// dst[k * out_stride] for k < n, with the matrix rows of size n at mat_off.
+void fwd1d(int n, int src_off, int in_stride, int dst_off, int out_stride,
+           int shift, int mat_off, int src[32], out int dst[32]) {
+  int a[32];
+  int d[32];
+  int next_a[32];
+  int next_d[32];
+  const int nh = n >> 1;
+  for (int k = 0; k < nh; ++k) {
+    const int lo = src[src_off + k * in_stride];
+    const int hi = src[src_off + (n - 1 - k) * in_stride];
+    a[k] = lo + hi;
+    d[k] = lo - hi;  // D_0
+  }
+
+  int len = nh;
+  int j = 0;
+  for (;;) {
+    // Emit this difference vector: outputs 2^j + t * 2^(j+1).
+    const int start = 1 << j;
+    const int step = 2 << j;
+    for (int t = 0; t < len; ++t) {
+      const int k = start + t * step;
+      int acc = 0;
+      for (int i = 0; i < len; ++i) acc += m[mat_off + k * n + i] * d[i];
+      dst[dst_off + k * out_stride] = rshift(acc, shift);
+    }
+    if (len == 2) {
+      // The last sum vector keeps both coefficients (rows 0 and n/2).
+      int acc0 = 0;
+      int accn = 0;
+      for (int i = 0; i < 2; ++i) {
+        acc0 += m[mat_off + 0 * n + i] * a[i];
+        accn += m[mat_off + nh * n + i] * a[i];
+      }
+      dst[dst_off + 0 * out_stride] = rshift(acc0, shift);
+      dst[dst_off + nh * out_stride] = rshift(accn, shift);
+      break;
+    }
+    const int next_len = len >> 1;
+    for (int t = 0; t < next_len; ++t) {
+      next_a[t] = a[t] + a[len - 1 - t];
+      next_d[t] = a[t] - a[len - 1 - t];
+    }
+    for (int t = 0; t < next_len; ++t) {
+      a[t] = next_a[t];
+      d[t] = next_d[t];
+    }
+    len = next_len;
+    ++j;
+  }
+}
+
+void main() {
+  const uint b = gl_GlobalInvocationID.x;
+  if (b >= pc.count) return;
+
+  const int w = int(pc.w);
+  const int h = int(pc.h);
+  const int dsx = int(pc.ds_x);
+  const int dsy = int(pc.ds_y);
+  const uint src_off = pos[b].x;
+  const uint dst_off = pos[b].y;
+
+  int block[1024];
+  int buf[1024];
+  int line[32];
+  int outv[32];
+
+  // Residual, box-downsampled along any 64-length axis.
+  for (int y = 0; y < h; ++y) {
+    const uint row0 = src_off + uint(y << dsy) * pc.diff_stride;
+    const uint row1 = row0 + (dsy != 0 ? pc.diff_stride : 0u);
+    for (int x = 0; x < w; ++x) {
+      const uint x0 = uint(x << dsx);
+      int sum = int(r[row0 + x0]);
+      if (dsx != 0) sum += int(r[row0 + x0 + 1u]);
+      if (dsy != 0) {
+        sum += int(r[row1 + x0]);
+        if (dsx != 0) sum += int(r[row1 + x0 + 1u]);
+      }
+      block[y * w + x] = sum;
+    }
+  }
+
+  // Pass one: columns of the residual with the height matrix, each column's
+  // outputs written contiguously.
+  for (int col = 0; col < w; ++col) {
+    for (int i = 0; i < h; ++i) line[i] = block[i * w + col];
+    fwd1d(h, 0, 1, 0, 1, int(pc.shift1), int(pc.mat_h_off), line, outv);
+    // fwd_transform_1d_c() advances dst by n per line: each column's outputs
+    // are contiguous, i.e. buf[col * h + k].
+    for (int k = 0; k < h; ++k) buf[col * h + k] = outv[k];
+  }
+
+  // Pass two: rows with the width matrix, row-major coefficient output.
+  for (int row = 0; row < h; ++row) {
+    for (int i = 0; i < w; ++i) line[i] = buf[i * h + row];
+    fwd1d(w, 0, 1, 0, 1, int(pc.shift2), 0, line, outv);
+    for (int k = 0; k < w; ++k) {
+      int v = outv[k];
+      if (pc.sqrt2 != 0u) v = rshift(v * NEW_SQRT2, NEW_SQRT2_BITS);
+      c[dst_off + uint(row * w + k)] = v;
+    }
+  }
+}

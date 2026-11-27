@@ -118,6 +118,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
+| `kernels/fwd_txfm.comp` | forward DCT2 with the reference's folded butterflies (sizes up to 32x32) and the 64-axis box downsample |
 | `kernels/cwpconv.comp` | compound prediction, the CWP family: all four shapes (`2d`, `x`, `y`, `copy`) of `av2_highbd_cwp_convolve_*_c()` over the high-precision buffer |
 | `kernels/pcwiener.comp` | PC-Wiener loop restoration: the symmetric 25-tap non-separable filter per 4x4 class block, one invocation per pixel |
 | `kernels/pcwcls.comp` | PC-Wiener classification: 6x6 directional-feature and tx-skip box sums, qval/tskip LUT, thresholds and class LUT, one invocation per 4x4 block |
@@ -369,6 +370,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] compound over a scaled reference: 1/1024 per-pixel phase in the kernel,
       gated against `av2_highbd_convolve_2d_scale_c()` (2 bitdepths x even/uneven
       x 3 scales), and taken by the seam
+- [x] forward transform call site: `av2_fwd_txfm()` runs the forward DCT2 kernel
+      when `AV2_GPU_FWD_TXFM=1` (34,475 transforms in the gate, bitstream
+      unchanged)
 - [x] warped (affine) prediction call site: `av2_make_inter_predictor()`'s
       WARP_PRED branch runs the affine or extended-range kernel when
       `AV2_GPU_INTER=1` (4,701 warped blocks in the gate at cpu-used 8, 77,403 at
@@ -412,7 +416,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   between two inter predictors (`av2_build_inter_predictors` masked modes) still
   goes through the C blend. The encoder only builds masks at slower presets
   (cpu-used 8 turns inter-intra off), which is why the gate uses cpu-used 2.
-- Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
+- The forward transform seam covers DCT_DCT at sizes up to 32x32. The
+  64-length axis is box-downsampled by the reference and that path is still a
+  couple of units off in the kernel, so those sizes (and every non-DCT_DCT
+  type) stay on the CPU; the 4x4/8x8 `avm_highbd_fdct*` hooks are dead code
+  because nothing in this tree calls those functions. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.
 - The inter seam's upload window is `last_base_y + 7` rows, which is the exact

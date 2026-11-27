@@ -21,10 +21,23 @@
 #ifndef AVM_GPU_TXFM_SPV_PATH
 #define AVM_GPU_TXFM_SPV_PATH "txfm.spv"
 #endif
+#ifndef AVM_GPU_FWD_TXFM_SPV_PATH
+#define AVM_GPU_FWD_TXFM_SPV_PATH "fwd_txfm.spv"
+#endif
 
 #define TXFM_WORKGROUP 64
 
+typedef struct fwd_constants {
+  uint32_t w, h, diff_stride, ds_x, ds_y, shift1, shift2, sqrt2, count;
+  uint32_t mat_h_off;
+} fwd_constants;
+
 struct avm_gpu_txfm {
+  avm_gpu_pipeline *fwd_pipe;
+  avm_gpu_buf f_resi, f_pos, f_coef, f_mat;
+  VkDeviceSize f_resi_cap, f_pos_cap, f_coef_cap, f_mat_cap;
+  uint32_t *f_expand;
+  size_t f_expand_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_buf src, pos, out;
   VkDeviceSize src_cap, pos_cap, out_cap;
@@ -56,6 +69,12 @@ int avm_gpu_txfm_create(avm_gpu_ctx *ctx, avm_gpu_txfm **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
+  if (avm_gpu_pipeline_create(ctx, AVM_GPU_FWD_TXFM_SPV_PATH,
+                              "AVM_GPU_FWD_TXFM_SPV", 4, sizeof(fwd_constants),
+                              &t->fwd_pipe, err) != 0) {
+    free(t);
+    return -1;
+  }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_TXFM_SPV_PATH, "AVM_GPU_TXFM_SPV",
                               3, sizeof(push_constants), &t->pipe,
                               err) != 0) {
@@ -68,6 +87,12 @@ int avm_gpu_txfm_create(avm_gpu_ctx *ctx, avm_gpu_txfm **out,
 
 void avm_gpu_txfm_destroy(avm_gpu_ctx *ctx, avm_gpu_txfm *t) {
   if (!t) return;
+  avm_gpu_pipeline_destroy(ctx, t->fwd_pipe);
+  avm_gpu_buf_destroy(ctx, &t->f_resi);
+  avm_gpu_buf_destroy(ctx, &t->f_pos);
+  avm_gpu_buf_destroy(ctx, &t->f_coef);
+  avm_gpu_buf_destroy(ctx, &t->f_mat);
+  free(t->f_expand);
   avm_gpu_pipeline_destroy(ctx, t->pipe);
   avm_gpu_buf_destroy(ctx, &t->src);
   avm_gpu_buf_destroy(ctx, &t->pos);
@@ -147,4 +172,83 @@ int avm_gpu_txfm_fdct(avm_gpu_ctx *ctx, avm_gpu_txfm *t,
                                 err);
   if (rc == 0) memcpy(coeffs, t->out.mapped, (size_t)out_bytes);
   return rc;
+}
+
+int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
+                     int diff_stride, const avm_gpu_txfm_pos *pos, int n,
+                     int tx_w, int tx_h, int shift1, int shift2,
+                     const int *mat_w, const int *mat_h, int32_t *coeff,
+                     char err[AVM_GPU_ERR_LEN]) {
+  if (n <= 0) return 0;
+  if (!resi || !pos || !mat_w || !mat_h || !coeff || diff_stride <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if (tx_w < 4 || tx_h < 4 || tx_w > 64 || tx_h > 64 || (tx_w & 3) ||
+      (tx_h & 3)) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported transform size %dx%d", tx_w,
+             tx_h);
+    return -1;
+  }
+  const int w = tx_w > 32 ? 32 : tx_w;
+  const int h = tx_h > 32 ? 32 : tx_h;
+  const int ds_x = tx_w > 32;
+  const int ds_y = tx_h > 32;
+
+  size_t max_off = 0;
+  for (int i = 0; i < n; i++) {
+    const size_t rows = (size_t)(ds_y ? (h - 1) * 2 : h - 1);
+    const size_t cols = (size_t)(ds_x ? (w - 1) * 2 : w - 1);
+    const size_t last = (size_t)pos[i].resi_off + rows * diff_stride + cols + 1;
+    if (last > max_off) max_off = last;
+  }
+  if (max_off > t->f_expand_cap) {
+    free(t->f_expand);
+    t->f_expand = malloc(max_off * sizeof(*t->f_expand));
+    t->f_expand_cap = t->f_expand ? max_off : 0;
+    if (!t->f_expand) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < max_off; i++) t->f_expand[i] = (uint32_t)(int32_t)resi[i];
+
+  const VkDeviceSize resi_bytes = (VkDeviceSize)max_off * 4;
+  const VkDeviceSize coef_bytes = (VkDeviceSize)n * (VkDeviceSize)w * h * 4;
+  const VkDeviceSize mat_bytes = (VkDeviceSize)(w * w + h * h) * 4;
+  if (ensure_buf(ctx, &t->f_resi, &t->f_resi_cap, resi_bytes, err) ||
+      ensure_buf(ctx, &t->f_pos, &t->f_pos_cap,
+                 (VkDeviceSize)n * sizeof(*pos), err) ||
+      ensure_buf(ctx, &t->f_coef, &t->f_coef_cap, coef_bytes, err)) {
+    return -1;
+  }
+  if (t->f_mat.size < mat_bytes) {
+    avm_gpu_buf_destroy(ctx, &t->f_mat);
+    if (avm_gpu_buf_create(ctx, mat_bytes, &t->f_mat, err) != 0) return -1;
+  }
+  memcpy(t->f_resi.mapped, t->f_expand, (size_t)resi_bytes);
+  memcpy(t->f_pos.mapped, pos, (size_t)n * sizeof(*pos));
+  int32_t *mp = t->f_mat.mapped;
+  memcpy(mp, mat_w, (size_t)(w > h ? w * w : w * w) * 4);
+  memcpy(mp + w * w, mat_h, (size_t)h * h * 4);
+
+  const avm_gpu_buf bufs[4] = { t->f_resi, t->f_coef, t->f_pos, t->f_mat };
+  const int log2w = tx_w == 64 ? 6 : (tx_w == 32 ? 5 : (tx_w == 16 ? 4 : (tx_w == 8 ? 3 : 2)));
+  const int log2h = tx_h == 64 ? 6 : (tx_h == 32 ? 5 : (tx_h == 16 ? 4 : (tx_h == 8 ? 3 : 2)));
+  fwd_constants pc = { (uint32_t)w,        (uint32_t)h,
+                       (uint32_t)diff_stride, (uint32_t)ds_x,
+                       (uint32_t)ds_y,     (uint32_t)shift1,
+                       (uint32_t)shift2,   (uint32_t)((log2w + log2h) & 1),
+                       (uint32_t)n,        (uint32_t)(w * w) };
+  const uint32_t groups = (uint32_t)((n + 31) / 32);
+  const int rc = avm_gpu_pipeline_dispatch(ctx, t->fwd_pipe, bufs, 4, &pc,
+                                           sizeof(pc), groups, err);
+  if (rc != 0) return rc;
+
+  int32_t *out = t->f_coef.mapped;
+  for (int i = 0; i < n; i++) {
+    memcpy(coeff + pos[i].coef_off, out + (size_t)i * w * h,
+           (size_t)w * h * 4);
+  }
+  return 0;
 }

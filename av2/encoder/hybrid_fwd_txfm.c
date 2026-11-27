@@ -22,6 +22,10 @@
 #include "av2/common/txb_common.h"
 #include "av2/encoder/hybrid_fwd_txfm.h"
 
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_inter.h"
+#endif
+
 void av2_lossless_fwd_idtx_c(const int16_t *src_diff, tran_low_t *coeff,
                              int diff_stride, TxfmParam *txfm_param) {
   const int txw = tx_size_wide[txfm_param->tx_size];
@@ -891,6 +895,31 @@ void av2_fwd_txfm(const int16_t *src_diff, tran_low_t *coeff, int diff_stride,
       return;
     }
   }
+#if defined(AVM_GPU_HOOKS)
+  // Optional Vulkan path (avm_gpu/): the DCT2 matrix kernels on the GPU, sizes
+  // up to 32x32. Returns 0 and falls through to the C transform otherwise.
+  if (!txfm_param->lossless && txfm_param->primary_tx_type == DCT_DCT &&
+      !txfm_param->use_ddt &&
+      tx_size_wide[txfm_param->tx_size] <= 32 &&
+      tx_size_high[txfm_param->tx_size] <= 32) {
+    const TX_SIZE txs = txfm_param->tx_size;
+    const int tw = tx_size_wide[txs];
+    const int th = tx_size_high[txs];
+    const int *mat_w = tw == 4    ? &tx_kernel_dct2_size4[FWD_TXFM][0][0]
+                       : tw == 8  ? &tx_kernel_dct2_size8[FWD_TXFM][0][0]
+                       : tw == 16 ? &tx_kernel_dct2_size16[FWD_TXFM][0][0]
+                                  : &tx_kernel_dct2_size32[FWD_TXFM][0][0];
+    const int *mat_h = th == 4    ? &tx_kernel_dct2_size4[FWD_TXFM][0][0]
+                       : th == 8  ? &tx_kernel_dct2_size8[FWD_TXFM][0][0]
+                       : th == 16 ? &tx_kernel_dct2_size16[FWD_TXFM][0][0]
+                                  : &tx_kernel_dct2_size32[FWD_TXFM][0][0];
+    if (avm_gpu_hook_fwd_txfm(src_diff, coeff, diff_stride, tw, th,
+                              fwd_tx_shift[txs][0], fwd_tx_shift[txs][1],
+                              mat_w, mat_h)) {
+      return;
+    }
+  }
+#endif
   fwd_txfm(src_diff, coeff, diff_stride, txfm_param);
 }
 

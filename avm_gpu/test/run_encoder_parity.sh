@@ -110,7 +110,7 @@ if ! "$AVMENC" $INTER_ARGS -o "$work/motion_cpu.ivf" "$work/motion.y4m" \
   tail -20 "$work/motion_cpu.log"
   exit 1
 fi
-if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $INTER_ARGS \
+if ! AV2_GPU_INTER=1 AV2_GPU_FWD_TXFM=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $INTER_ARGS \
     -o "$work/motion_gpu.ivf" "$work/motion.y4m" >"$work/inter.log" 2>&1; then
   if grep -q "no Vulkan device\|vkCreateInstance" "$work/inter.log"; then
     echo "SKIP: no Vulkan device"
@@ -127,6 +127,7 @@ if ! grep -q "inter hook enabled" "$work/inter.log"; then
 fi
 icalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) inter prediction blocks.*/\1/p' "$work/inter.log")
 wcalls=$(sed -n 's/.* \([0-9][0-9]*\) warped.*/\1/p' "$work/inter.log")
+fcalls=$(sed -n 's/.* \([0-9][0-9]*\) forward transforms.*/\1/p' "$work/inter.log")
 if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   echo "FAIL: the GPU inter path predicted no blocks"
   tail -20 "$work/inter.log"
@@ -134,6 +135,11 @@ if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
 fi
 if [ -z "$wcalls" ] || [ "$wcalls" -le 0 ]; then
   echo "FAIL: the GPU warp path predicted no blocks"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if [ -z "$fcalls" ] || [ "$fcalls" -le 0 ]; then
+  echo "FAIL: the GPU forward transform ran on no blocks"
   tail -20 "$work/inter.log"
   exit 1
 fi
@@ -183,7 +189,7 @@ echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
 inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
-echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped)"
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped, $fcalls forward transforms)"
 
 mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")

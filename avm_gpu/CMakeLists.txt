@@ -37,6 +37,7 @@ set(AVM_GPU_COMPOUND_SPV "${AVM_GPU_SPV_DIR}/compound.spv")
 set(AVM_GPU_WARP_SPV "${AVM_GPU_SPV_DIR}/warp.spv")
 set(AVM_GPU_WARP_EXT_SPV "${AVM_GPU_SPV_DIR}/warp_ext.spv")
 set(AVM_GPU_CWP_SPV "${AVM_GPU_SPV_DIR}/cwp.spv")
+set(AVM_GPU_FWD_TXFM_SPV "${AVM_GPU_SPV_DIR}/fwd_txfm.spv")
 set(AVM_GPU_CWPCONV_SPV "${AVM_GPU_SPV_DIR}/cwpconv.spv")
 set(AVM_GPU_PCWIENER_SPV "${AVM_GPU_SPV_DIR}/pcwiener.spv")
 set(AVM_GPU_PCWCLS_SPV "${AVM_GPU_SPV_DIR}/pcwcls.spv")
@@ -87,6 +88,14 @@ add_custom_command(
           "${AVM_GPU_ITXFM_SPV}"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/itxfm.comp"
   COMMENT "avm_gpu: itxfm.comp -> itxfm.spv"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_FWD_TXFM_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/fwd_txfm.comp" -o
+          "${AVM_GPU_FWD_TXFM_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/fwd_txfm.comp"
+  COMMENT "avm_gpu: fwd_txfm.comp -> fwd_txfm.spv"
   VERBATIM)
 add_custom_command(
   OUTPUT "${AVM_GPU_CWPCONV_SPV}"
@@ -188,7 +197,8 @@ add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_CWP_SPV}"
                                           "${AVM_GPU_PCWIENER_SPV}"
                                           "${AVM_GPU_PCWCLS_SPV}"
-                                          "${AVM_GPU_CWPCONV_SPV}")
+                                          "${AVM_GPU_CWPCONV_SPV}"
+                                          "${AVM_GPU_FWD_TXFM_SPV}")
 
 add_library(
   avm_gpu STATIC
@@ -228,7 +238,8 @@ target_compile_definitions(avm_gpu
                                    AVM_GPU_CWP_SPV_PATH="${AVM_GPU_CWP_SPV}"
                                    AVM_GPU_PCWIENER_SPV_PATH="${AVM_GPU_PCWIENER_SPV}"
                                    AVM_GPU_PCWCLS_SPV_PATH="${AVM_GPU_PCWCLS_SPV}"
-                                   AVM_GPU_CWPCONV_SPV_PATH="${AVM_GPU_CWPCONV_SPV}")
+                                   AVM_GPU_CWPCONV_SPV_PATH="${AVM_GPU_CWPCONV_SPV}"
+                                   AVM_GPU_FWD_TXFM_SPV_PATH="${AVM_GPU_FWD_TXFM_SPV}")
 # Vulkan structs are initialised by sType; the remaining fields are required
 # to be zero, so the missing-field diagnostic is noise here.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

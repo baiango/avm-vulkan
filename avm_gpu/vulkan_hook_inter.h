@@ -74,6 +74,17 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                       int p_height, int p_stride, int ss_x, int ss_y,
                       int round_0, int is_scaled, int use_warp_bd_box);
 
+/*
+ * Forward transform seam: fwd_txfm_c()'s DCT2 path for sizes up to 32x32. A
+ * 64-length axis is box-downsampled by the reference and that path is not
+ * bit-exact yet, so those sizes stay on the CPU. mat_w/mat_h are
+ * tx_kernel_dct2_size{tx}[FWD_TXFM], shift1/shift2 fwd_tx_shift[tx].
+ * Inert unless AV2_GPU_FWD_TXFM=1.
+ */
+int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
+                          int tx_w, int tx_h, int shift1, int shift2,
+                          const int *mat_w, const int *mat_h);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
