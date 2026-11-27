@@ -66,6 +66,37 @@ int avm_gpu_pcwiener_filter(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc,
                             const int16_t *filters, uint16_t *dst,
                             char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Classification half of apply_pc_wiener_highbd(): one invocation per 4x4
+ * block, producing the class ids the filter stage consumes. The quantiser-
+ * dependent tables (qval/tskip LUT, feature normalisers, thresholds and the
+ * class LUT) are inputs, taken from the same place the C gets them
+ * (fill_qval_given_tskip_lut, set_feature_normalizers, pc_wiener_thresholds,
+ * pc_wiener_lut_to_class_index).
+ */
+typedef struct avm_gpu_pcwiener_classify_params {
+  int width, height;   /* visible area */
+  int stride;          /* dgd row stride, in samples */
+  int rows;            /* upload rows (>= height + 2 + lead_rows) */
+  int lead_rows;       /* border rows above the visible origin */
+  int lead_cols;       /* border columns left of the visible origin */
+  int bd;              /* bit depth */
+  int cell_stride;     /* class-id plane stride, in 4x4 blocks */
+  int cell_rows;       /* class-id plane rows */
+  int tskip_stride;    /* tx-skip plane stride in blocks, 0 when unused */
+  const int32_t *qval_lut;     /* [256][NUM_PC_WIENER_FEATURES] */
+  const int32_t *normalizers;  /* [NUM_PC_WIENER_FEATURES + 1] */
+  const int32_t *thresholds;   /* [NUM_PC_WIENER_FEATURES] */
+  const uint8_t *lut_to_class; /* [PC_WIENER_LUT_SIZE] */
+  int prec_feature;            /* PC_WIENER_PREC_FEATURE */
+  int thr_shift;               /* pc_wiener_threshold_shift */
+} avm_gpu_pcwiener_classify_params;
+
+int avm_gpu_pcwiener_classify(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc,
+                              const avm_gpu_pcwiener_classify_params *params,
+                              const uint16_t *dgd, const uint8_t *tskip,
+                              uint8_t *class_id, char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

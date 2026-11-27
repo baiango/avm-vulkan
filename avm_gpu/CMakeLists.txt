@@ -38,6 +38,7 @@ set(AVM_GPU_WARP_SPV "${AVM_GPU_SPV_DIR}/warp.spv")
 set(AVM_GPU_WARP_EXT_SPV "${AVM_GPU_SPV_DIR}/warp_ext.spv")
 set(AVM_GPU_CWP_SPV "${AVM_GPU_SPV_DIR}/cwp.spv")
 set(AVM_GPU_PCWIENER_SPV "${AVM_GPU_SPV_DIR}/pcwiener.spv")
+set(AVM_GPU_PCWCLS_SPV "${AVM_GPU_SPV_DIR}/pcwcls.spv")
 
 add_custom_command(
   OUTPUT "${AVM_GPU_SAD_SPV}"
@@ -93,6 +94,14 @@ add_custom_command(
           "${AVM_GPU_PCWIENER_SPV}"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/pcwiener.comp"
   COMMENT "avm_gpu: pcwiener.comp -> pcwiener.spv"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${AVM_GPU_PCWCLS_SPV}"
+  COMMAND "${AVM_GPU_GLSLANG}" -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/kernels/pcwcls.comp" -o
+          "${AVM_GPU_PCWCLS_SPV}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/pcwcls.comp"
+  COMMENT "avm_gpu: pcwcls.comp -> pcwcls.spv"
   VERBATIM)
 add_custom_command(
   OUTPUT "${AVM_GPU_INTER_SPV}"
@@ -168,7 +177,8 @@ add_custom_target(avm_gpu_shaders DEPENDS "${AVM_GPU_SAD_SPV}"
                                           "${AVM_GPU_WARP_SPV}"
                                           "${AVM_GPU_WARP_EXT_SPV}"
                                           "${AVM_GPU_CWP_SPV}"
-                                          "${AVM_GPU_PCWIENER_SPV}")
+                                          "${AVM_GPU_PCWIENER_SPV}"
+                                          "${AVM_GPU_PCWCLS_SPV}")
 
 add_library(
   avm_gpu STATIC
@@ -204,7 +214,8 @@ target_compile_definitions(avm_gpu
                                    AVM_GPU_WARP_SPV_PATH="${AVM_GPU_WARP_SPV}"
                                    AVM_GPU_WARP_EXT_SPV_PATH="${AVM_GPU_WARP_EXT_SPV}"
                                    AVM_GPU_CWP_SPV_PATH="${AVM_GPU_CWP_SPV}"
-                                   AVM_GPU_PCWIENER_SPV_PATH="${AVM_GPU_PCWIENER_SPV}")
+                                   AVM_GPU_PCWIENER_SPV_PATH="${AVM_GPU_PCWIENER_SPV}"
+                                   AVM_GPU_PCWCLS_SPV_PATH="${AVM_GPU_PCWCLS_SPV}")
 # Vulkan structs are initialised by sType; the remaining fields are required
 # to be zero, so the missing-field diagnostic is noise here.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -282,6 +293,15 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_pcwiener_test PRIVATE avm)
   add_test(NAME avm_gpu_pcwiener_test COMMAND avm_gpu_pcwiener_test)
   set_tests_properties(avm_gpu_pcwiener_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The filter stage on its own: all four filter sets, two geometries.
+  add_executable(avm_gpu_pcwiener_filter_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_pcwiener_filter_test.c")
+  target_link_libraries(avm_gpu_pcwiener_filter_test PRIVATE avm)
+  add_test(NAME avm_gpu_pcwiener_filter_test
+           COMMAND avm_gpu_pcwiener_filter_test)
+  set_tests_properties(avm_gpu_pcwiener_filter_test
+                       PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(avm_gpu_itxfm_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_itxfm_test.c")

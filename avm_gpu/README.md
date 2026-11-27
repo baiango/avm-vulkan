@@ -105,7 +105,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
-| `pcwiener.{h,c}` | PC-Wiener restoration filter stage: class id -> filter -> symmetric taps, host-derived tap geometry |
+| `pcwiener.{h,c}` | PC-Wiener restoration, both stages: `avm_gpu_pcwiener_classify()` and `avm_gpu_pcwiener_filter()`, host-derived tap geometry |
 | `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
@@ -119,6 +119,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
 | `kernels/pcwiener.comp` | PC-Wiener loop restoration: the symmetric 25-tap non-separable filter per 4x4 class block, one invocation per pixel |
+| `kernels/pcwcls.comp` | PC-Wiener classification: 6x6 directional-feature and tx-skip box sums, qval/tskip LUT, thresholds and class LUT, one invocation per 4x4 block |
 | `kernels/sad.comp` | GLSL compute shader, one workgroup per candidate |
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
@@ -131,7 +132,8 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair |
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
-| `test/avm_gpu_pcwiener_test.c` | parity gate against `av2_convolve_symmetric_highbd_c()`, AVM's own filter banks and tap config |
+| `test/avm_gpu_pcwiener_test.c` | end-to-end gate against `apply_pc_wiener_highbd()`: class ids, then the restored plane |
+| `test/avm_gpu_pcwiener_filter_test.c` | filter stage alone against `av2_convolve_symmetric_highbd_c()`, AVM's own filter banks and tap config |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
@@ -351,6 +353,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] CCSO block pass + parity gate (1008 cases)
 - [x] PC-Wiener restoration filter stage + parity gate (2 geometries x 4 filter
       sets x 2 bitdepths against `av2_convolve_symmetric_highbd_c()`)
+- [x] PC-Wiener classification stage + end-to-end gate (class ids and the
+      restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
+      tx-skip on/off)
 - [x] encoder call sites (batched SAD and variance) with a byte-identical
       bitstream gate
 - [x] source-block residency per search and one-step search lookahead
@@ -367,13 +372,12 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
-- Kernel families still missing: the **classification half** of PC-Wiener loop
-  restoration (`apply_pc_wiener_highbd`'s feature/tskip accumulators and class
-  lookups), and the forward DCT only covers 4x4/8x8. The filter half is gated
-  (`kernels/pcwiener.comp`); the classifier is a row-sequential engine over
-  `PcwienerBuffers`, so it has to be ported as a separate, smaller kernel with
-  the host producing the qstep/tskip LUT exactly as `fill_qval_given_tskip_lut`
-  does.
+- Kernel families still missing: the forward DCT only covers 4x4/8x8. Loop
+  restoration is now complete as kernels (classification + filtering, gated
+  end to end), but it is not wired into the decoder/encoder: the classifier
+  needs the qval/tskip LUT built host-side (`fill_qval_given_tskip_lut` is
+  static, so the seam has to expose it) before `pc_wiener_stripe_highbd()` can
+  call the GPU pair.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

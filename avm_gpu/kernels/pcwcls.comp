@@ -1,0 +1,133 @@
+#version 450
+// PC-Wiener restoration classification, one invocation per 4x4 block.
+//
+// Mirrors the classifier half of apply_pc_wiener_highbd()
+// (av2/common/restoration.c): the directional features are 5x5 box sums of
+// |gradient| in three orientations plus a box sum of the tx-skip flags, run
+// through the feature normalisers, the qstep/tskip LUT, the per-feature
+// thresholds and finally pc_wiener_lut_to_class_index.
+//
+// The C keeps the box filters as sliding accumulators over line buffers. With
+// feature_lead = 1 and feature_lag = 4 the window is feature_length = 6 rows
+// and 6 buffer columns, and the accumulator for block idx is the sliding sum
+// that ends at buffer column 4*idx + 5:
+//
+//   S[j]     = sum over the 6-row window of the gradient at buffer column j
+//              (buffer column j is pixel column j - feature_lead)
+//   acc[idx] = S[4*idx] + ... + S[4*idx + 5]
+//
+// which is the closed form of the C's
+//   acc[idx] = acc[idx-1] + S[4*idx + 5] - S[4*idx - 1].
+// Every row index is clamped to height + 1 and every gradient column to
+// width + 1, and tx-skip rows to [0, height-1], exactly as the C does.
+//
+// Inputs that the C derives from the quantiser (the qval/tskip LUT, the
+// normalisers, the thresholds and the class LUT) arrive from the host, which
+// takes them from the same tables/setup code.
+
+layout(local_size_x = 16) in;
+
+layout(std430, binding = 0) readonly buffer Dgd { uint img[]; };
+layout(std430, binding = 1) readonly buffer Tsk { uint tsk[]; };
+layout(std430, binding = 2) readonly buffer Lut { int qval_lut[]; };
+layout(std430, binding = 3) readonly buffer Norm { int norm[]; };
+layout(std430, binding = 4) readonly buffer Thr { int thr[]; };
+layout(std430, binding = 5) readonly buffer Cls { uint cls_lut[]; };
+layout(std430, binding = 6) buffer Out { uint out_cls[]; };
+
+layout(push_constant) uniform PC {
+  uint width;
+  uint height;
+  uint stride;
+  uint lead_rows;
+  uint lead_cols;
+  uint tskip_stride;
+  uint use_tskip;
+  uint bd;
+  uint cell_stride;
+  uint cell_count;
+  uint prec_feature;
+  uint thr_shift;
+} pc;
+
+int origin;
+
+int dgd_at(int r, int c) {
+  return int(img[uint(origin + r * int(pc.stride) + c)]);
+}
+
+/* Sum of the three directional gradient magnitudes over the 6-row window. */
+void grad_sum(int row, int j, out int s1, out int s2, out int s3) {
+  const int col = j - 1; /* buffer column -> pixel column */
+  const int cc = min(col, int(pc.width) + 1);
+  s1 = 0;
+  s2 = 0;
+  s3 = 0;
+  for (int u = -1; u <= 4; ++u) {
+    const int rr = min(row + u, int(pc.height) + 1);
+    const int b = 2 * dgd_at(rr, cc);
+    s1 += abs(dgd_at(rr - 1, cc) + dgd_at(rr + 1, cc) - b);
+    s2 += abs(dgd_at(rr - 1, cc + 1) + dgd_at(rr + 1, cc - 1) - b);
+    s3 += abs(dgd_at(rr - 1, cc - 1) + dgd_at(rr + 1, cc + 1) - b);
+  }
+}
+
+/* Sum of the tx-skip values over the 6-row window of buffer column j. */
+int tsk_sum(int row, int j) {
+  const int col = j - 1;
+  const int blk = clamp(col >> 2, 0, (int(pc.width) - 1) >> 2);
+  int s = 0;
+  for (int u = -1; u <= 4; ++u) {
+    const int rr = clamp(row + u, 0, int(pc.height) - 1);
+    s += int(tsk[uint((rr >> 2) * int(pc.tskip_stride) + blk)]);
+  }
+  return s;
+}
+
+int round_signed(int v, int n) {
+  const int rnd = 1 << (n - 1);
+  return v < 0 ? -((-v + rnd) >> n) : ((v + rnd) >> n);
+}
+
+void main() {
+  const uint cell = gl_GlobalInvocationID.x;
+  if (cell >= pc.cell_count) return;
+  origin = int(pc.lead_rows) * int(pc.stride) + int(pc.lead_cols);
+
+  const int bx = int(cell % pc.cell_stride);
+  const int by = int(cell / pc.cell_stride);
+  const int row = by * 4;
+  const int idx = bx;
+
+  int a1 = 0, a2 = 0, a3 = 0, at = 0;
+  for (int j = 4 * idx; j <= 4 * idx + 5; ++j) {
+    int s1, s2, s3;
+    grad_sum(row, j, s1, s2, s3);
+    a1 += s1;
+    a2 += s2;
+    a3 += s3;
+    if (pc.use_tskip != 0u) at += tsk_sum(row, j);
+  }
+
+  const int bd_shift = int(pc.bd) - 8;
+  int f[4];
+  f[0] = 0; /* the horizontal feature is never populated (asserted in the C) */
+  f[1] = norm[1] * a1;
+  f[2] = norm[2] * a2;
+  f[3] = norm[3] * a3;
+  if (bd_shift > 0) {
+    for (int k = 1; k <= 3; ++k) f[k] = round_signed(f[k], bd_shift);
+  }
+  int tskip_feature = norm[4] * at;
+  tskip_feature = clamp(tskip_feature, 0, 255);
+
+  int lut_input = 0;
+  for (int k = 0; k < 4; ++k) {
+    const int qval = round_signed(f[k] + qval_lut[tskip_feature * 4 + k],
+                                  int(pc.prec_feature));
+    const int fv = clamp(qval, 0, 255) >> int(pc.thr_shift);
+    lut_input += thr[k] * fv;
+  }
+  lut_input = clamp(lut_input, 0, 4095);
+  out_cls[cell] = cls_lut[lut_input];
+}
