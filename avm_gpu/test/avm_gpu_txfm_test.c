@@ -228,12 +228,10 @@ int main(void) {
   free(plane);
   /* fwd_txfm_c(): every size the encoder uses, DCT_DCT. */
   {
-    /* Sizes without a 64-length axis: the 64 axis is box-downsampled and that
-     * path still differs from the reference by a couple of units, so it is not
-     * gated (and the seam refuses those sizes). */
     static const TX_SIZE kFwd[] = {
-      TX_4X4, TX_8X8,    TX_16X16, TX_32X32, TX_4X8,   TX_8X4,
-      TX_8X16, TX_16X8,  TX_16X32, TX_32X16, TX_4X16,  TX_16X4,
+      TX_4X4,   TX_8X8,   TX_16X16, TX_32X32, TX_64X64, TX_4X8,
+      TX_8X4,   TX_8X16,  TX_16X8,  TX_16X32, TX_32X16, TX_32X64,
+      TX_64X32, TX_16X64, TX_64X16, TX_4X16,  TX_16X4,
     };
     for (int bd = 10; bd <= 12; bd += 2) {
       for (size_t i = 0; i < sizeof(kFwd) / sizeof(kFwd[0]); i++) {

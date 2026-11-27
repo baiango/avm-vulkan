@@ -279,7 +279,10 @@ int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
                           int tx_w, int tx_h, int shift1, int shift2,
                           const int *mat_w, const int *mat_h) {
   if (!resi || !coeff || !mat_w || !mat_h) return 0;
-  if (tx_w < 4 || tx_h < 4 || tx_w > 32 || tx_h > 32) return 0;
+  if (tx_w < 4 || tx_h < 4 || tx_w > 64 || tx_h > 64 || (tx_w & 3) ||
+      (tx_h & 3)) {
+    return 0;
+  }
 
   pthread_mutex_lock(&g_lock);
   int handled = 0;

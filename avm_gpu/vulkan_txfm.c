@@ -197,8 +197,10 @@ int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
 
   size_t max_off = 0;
   for (int i = 0; i < n; i++) {
-    const size_t rows = (size_t)(ds_y ? (h - 1) * 2 : h - 1);
-    const size_t cols = (size_t)(ds_x ? (w - 1) * 2 : w - 1);
+    /* The downsample reads row (y << ds_y) and, when ds_y, the line below it,
+     * and column (x << ds_x) plus one when ds_x. */
+    const size_t rows = (size_t)(((h - 1) << ds_y) + (ds_y ? 1 : 0));
+    const size_t cols = (size_t)(((w - 1) << ds_x) + (ds_x ? 1 : 0));
     const size_t last = (size_t)pos[i].resi_off + rows * diff_stride + cols + 1;
     if (last > max_off) max_off = last;
   }

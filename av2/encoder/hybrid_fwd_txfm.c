@@ -900,8 +900,8 @@ void av2_fwd_txfm(const int16_t *src_diff, tran_low_t *coeff, int diff_stride,
   // up to 32x32. Returns 0 and falls through to the C transform otherwise.
   if (!txfm_param->lossless && txfm_param->primary_tx_type == DCT_DCT &&
       !txfm_param->use_ddt &&
-      tx_size_wide[txfm_param->tx_size] <= 32 &&
-      tx_size_high[txfm_param->tx_size] <= 32) {
+      tx_size_wide[txfm_param->tx_size] <= 64 &&
+      tx_size_high[txfm_param->tx_size] <= 64) {
     const TX_SIZE txs = txfm_param->tx_size;
     const int tw = tx_size_wide[txs];
     const int th = tx_size_high[txs];
