@@ -40,6 +40,21 @@ int avm_gpu_deblock_generic(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
                             int vertical, uint16_t *out,
                             char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Windowed variant for the encode seam: p points at the edge inside a real
+ * frame buffer, across_pitch is the stride of the delta direction (1 for a
+ * vertical filter, the frame stride for a horizontal one) and step is the
+ * distance between the four filtered samples (the frame stride for a vertical
+ * filter, 1 for a horizontal one). Only the samples the filter can read or
+ * write are uploaded and written back, so a caller's plane or band extent never
+ * matters and neighbouring rows cannot be disturbed.
+ */
+int avm_gpu_deblock_window(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
+                           const uint16_t *p, int across_pitch, int step,
+                           int filt_neg, int filt_pos, int q_thresh,
+                           int side_thresh, int bd, int ll_neg, int ll_pos,
+                           uint16_t *out, char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

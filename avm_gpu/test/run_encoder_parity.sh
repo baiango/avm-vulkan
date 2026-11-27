@@ -303,6 +303,84 @@ for den in 9 12; do
   resize_counts="$resize_counts $den:$sw"
 done
 
+# Eight call site: the deblock filters, at both the encoder's own call sites
+# (av2_filter_block_plane_{vert,horz}) and the TIP-frame pass. Deblocking changes
+# every reconstructed frame, so this is checked against the CPU at three presets
+# plus on the noisy clip, and the decoder-side filter is checked as well.
+deblock_check() { # name, clip, args
+  if ! AV2_GPU_DEBLOCK=1 AV2_GPU_DEBLOCK_STATS=1 "$AVMENC" $3 \
+      -o "$work/db_$1.ivf" "$2" >"$work/db_$1.log" 2>&1; then
+    if grep -q "no Vulkan device\|vkCreateInstance" "$work/db_$1.log"; then
+      echo "SKIP: no Vulkan device"
+      exit 77
+    fi
+    echo "FAIL: GPU deblock encode ($1) failed"
+    tail -20 "$work/db_$1.log"
+    exit 1
+  fi
+  if ! grep -q "deblock hook enabled" "$work/db_$1.log"; then
+    echo "FAIL: the Vulkan deblock hook did not initialise ($1)"
+    tail -20 "$work/db_$1.log"
+    exit 1
+  fi
+  dedges=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) deblock edges on the GPU.*/\1/p' "$work/db_$1.log")
+  if [ -z "$dedges" ] || [ "$dedges" -le 0 ]; then
+    echo "FAIL: the GPU filtered no deblock edge ($1)"
+    tail -20 "$work/db_$1.log"
+    exit 1
+  fi
+  echo "deblock $1: $dedges edges, md5 $(hash_of "$work/db_$1.ivf")"
+}
+
+deblock_fail=0
+deblock_check noise8 "$work/noise.y4m" "$LR_ARGS"
+if [ "$(hash_of "$work/db_noise8.ivf")" != "$(hash_of "$work/lr_cpu.ivf")" ]; then
+  echo "FAIL: deblock bitstream differs from the CPU on the noise clip (cpu-used 8)"
+  deblock_fail=1
+fi
+for cu in 8 4 2; do
+  DB_ARGS="--limit=5 --good --cpu-used=$cu --passes=1 --threads=1"
+  if [ "$cu" = 8 ]; then
+    db_cpu="$work/motion_cpu.ivf"
+  else
+    if ! "$AVMENC" $DB_ARGS -o "$work/dbcu${cu}_cpu.ivf" "$work/motion.y4m" \
+        >"$work/dbcu${cu}_cpu.log" 2>&1; then
+      echo "FAIL: CPU deblock baseline encode (cpu-used $cu) failed"
+      tail -20 "$work/dbcu${cu}_cpu.log"
+      exit 1
+    fi
+    db_cpu="$work/dbcu${cu}_cpu.ivf"
+  fi
+  deblock_check "cu$cu" "$work/motion.y4m" "$DB_ARGS"
+  if [ "$(hash_of "$work/db_cu$cu.ivf")" != "$(hash_of "$db_cpu")" ]; then
+    echo "FAIL: deblock bitstream differs from the CPU at cpu-used $cu"
+    deblock_fail=1
+  fi
+done
+
+# The decoder runs the same av2_filter_block_plane_* path: decoding the stream
+# with the GPU deblock must reproduce the CPU decoder's output byte for byte.
+AVMDEC="$(dirname "$AVMENC")/avmdec"
+if [ -x "$AVMDEC" ]; then
+  if ! "$AVMDEC" --md5 "$work/db_cu8.ivf" >"$work/db_dec_cpu.log" 2>&1 ||
+      ! AV2_GPU_DEBLOCK=1 "$AVMDEC" --md5 "$work/db_cu8.ivf" \
+      >"$work/db_dec_gpu.log" 2>&1; then
+    echo "FAIL: deblock decode failed"
+    tail -20 "$work/db_dec_gpu.log"
+    exit 1
+  fi
+  db_yuv_cpu=$(sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' "$work/db_dec_cpu.log" | head -1)
+  db_yuv_gpu=$(sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' "$work/db_dec_gpu.log" | head -1)
+  if [ -z "$db_yuv_gpu" ] || [ "$db_yuv_cpu" != "$db_yuv_gpu" ]; then
+    echo "FAIL: GPU deblock decode differs ($db_yuv_gpu vs $db_yuv_cpu)"
+    deblock_fail=1
+  fi
+  echo "deblock decode: md5 $db_yuv_gpu (gpu) / $db_yuv_cpu (cpu)"
+fi
+if [ "$deblock_fail" -ne 0 ]; then
+  exit 1
+fi
+
 cpu_hash=$(hash_of "$work/cpu.ivf")
 gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
@@ -358,4 +436,4 @@ if [ "$mask_cpu_hash" != "$mask_hash" ]; then
   exit 1
 fi
 
-echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter and masked-compound paths"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration and deblock paths"

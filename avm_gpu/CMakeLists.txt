@@ -221,7 +221,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_lr.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_inter.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_itxfm.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_intra.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_intra.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_deblock.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
@@ -391,7 +392,10 @@ if(ENABLE_TESTS)
       NAME avm_gpu_encoder_parity
       COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/test/run_encoder_parity.sh"
               "$<TARGET_FILE:avmenc>")
-    set_tests_properties(avm_gpu_encoder_parity PROPERTIES SKIP_RETURN_CODE 77)
+    # The deblock section makes this gate the longest one (~23 min here); give it
+    # room instead of relying on ctest's 1500 s default.
+    set_tests_properties(avm_gpu_encoder_parity
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600)
     # Same gate with the speculative search lookahead turned off, so both
     # search shapes (one dispatch per step and one per two steps) are covered.
     add_test(
@@ -402,6 +406,7 @@ if(ENABLE_TESTS)
     set_tests_properties(
       avm_gpu_encoder_parity_no_lookahead
       PROPERTIES SKIP_RETURN_CODE 77
+                 TIMEOUT 3600
                  ENVIRONMENT "AV2_GPU_SAD_LOOKAHEAD=0")
   endif()
 endif()

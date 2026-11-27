@@ -113,3 +113,71 @@ int avm_gpu_deblock_generic(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
   for (size_t i = 0; i < pixels; i++) out[i] = (uint16_t)res[i];
   return 0;
 }
+
+int avm_gpu_deblock_window(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
+                           const uint16_t *p, int across_pitch, int step,
+                           int filt_neg, int filt_pos, int q_thresh,
+                           int side_thresh, int bd, int ll_neg, int ll_pos,
+                           uint16_t *out, char err[AVM_GPU_ERR_LEN]) {
+  if (!p || !out || across_pitch <= 0 || step <= 0) {
+    snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  /* The filter reads filt/2+2 samples across the edge; the four samples along
+   * it are the whole extent in that direction. */
+  /* The positive side can reach the full filter length (MAX_DBL_FLT_LEN = 8)
+   * and the negative side at most filt_neg; the delta itself reads 2 further
+   * out. A smaller window let the kernel write past its buffer. */
+  const int wider = filt_neg > 8 ? filt_neg : 8;
+  const int reach = wider + 2;
+  const int count = 4;
+  const int wspan = 2 * reach + 1;
+  const int hspan = count;
+
+  if (db->plane_cap < (size_t)wspan * hspan) {
+    free(db->plane);
+    db->plane = malloc((size_t)wspan * hspan * sizeof(*db->plane));
+    db->plane_cap = db->plane ? (size_t)wspan * hspan : 0;
+    if (!db->plane) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  uint32_t *win = db->plane;
+  for (int j = 0; j < hspan; j++) {
+    for (int i = 0; i < wspan; i++) {
+      win[(size_t)j * wspan + i] = p[j * step + (i - reach) * across_pitch];
+    }
+  }
+
+  if (db->img_cap < (VkDeviceSize)wspan * hspan * 4) {
+    avm_gpu_buf_destroy(ctx, &db->img);
+    if (avm_gpu_buf_create(ctx, (VkDeviceSize)wspan * hspan * 4, &db->img,
+                           err) != 0) {
+      return -1;
+    }
+    db->img_cap = db->img.size;
+  }
+  uint32_t *img = db->img.mapped;
+  for (int i = 0; i < wspan * hspan; i++) img[i] = win[i];
+
+  const avm_gpu_buf bufs[1] = { db->img };
+  /* The window is laid out so the four samples run along the rows: delta
+   * across, step = the window stride. */
+  push_constants pc = { (uint32_t)reach, 1u, (uint32_t)filt_neg,
+                        (uint32_t)filt_pos, (uint32_t)q_thresh,
+                        (uint32_t)side_thresh, (uint32_t)bd,
+                        (uint32_t)(ll_neg ? 1 : 0), (uint32_t)(ll_pos ? 1 : 0),
+                        (uint32_t)count, (uint32_t)wspan };
+  const int rc =
+      avm_gpu_pipeline_dispatch(ctx, db->pipe, bufs, 1, &pc, sizeof(pc), 1, err);
+  if (rc != 0) return rc;
+
+  for (int j = 0; j < hspan; j++) {
+    for (int i = 0; i < wspan; i++) {
+      out[j * step + (i - reach) * across_pitch] =
+          (uint16_t)img[(size_t)j * wspan + i];
+    }
+  }
+  return 0;
+}

@@ -56,10 +56,21 @@ and throughput is not claimed — this milestone is about correctness.
   prediction - with per-pixel fractional phases: 6 subpel positions x block
   sizes for 5 step pairs, whole-pel included (gate:
   `test/avm_gpu_inter_test.c`, 120 cases).
-- `avm_gpu_deblock_generic()` matches `avm_highbd_lpf_{horizontal,vertical}_
+- `avm_gpu_deblock_generic()` and its windowed sibling
+  `avm_gpu_deblock_window()` match `avm_highbd_lpf_{horizontal,vertical}_
   generic_c()` — filter choice plus the asymmetric delta application — over
-  378 combinations of width pair, q/side thresholds, lossless flags and
-  orientation (gate: `test/avm_gpu_deblock_test.c`).
+  122,880 combinations of width pair (4/4 … 18/18), q and side thresholds
+  (q, side 1…16 and 1024 random pairs), lossless flags, both bitdepths the gate
+  runs (8 and 10) and orientation, plus 48 cases through the windowed entry
+  point the seam uses (gate: `test/avm_gpu_deblock_test.c`). Two real kernel
+  defects were found while making that gate non-vacuous: the four filtered
+  samples were stepped by the delta pitch in both orientations (the reference
+  steps rows by the pitch for the vertical filter and by 1 for the horizontal
+  one), and the 3-sample test used `q*8` instead of `q*DF_8_THRESH` (`3`), which
+  only a small `q` exposes. The gate now counts how many cases actually
+  filtered and fails if none did — with random samples `filt_choice()` returns
+  0 almost always, and an earlier revision passed with a deliberate kernel
+  control in place.
 - `avm_gpu_cdef_filter16()` matches `av2_cdef_filter_16_{0,1,2,3}_c` — the
   constrained directional filter, its tap tables, the `CDEF_VERY_LARGE`
   min/max handling and the final clamp — over 5760 combinations of direction,
@@ -102,7 +113,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4..64 with reconstruction add (`avm_gpu_itxfm_add_tx()` for the 64-wide/tall sizes) |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference and its compound pass (conv buffer + average), and compound A64 blending |
 | `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk; all three with the compound conv buffer + average |
-| `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
+| `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical; whole-plane (`avm_gpu_deblock_generic()`) and the window the seam uploads (`avm_gpu_deblock_window()`) |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
 | `pcwiener.{h,c}` | PC-Wiener restoration, both stages: `avm_gpu_pcwiener_classify()` and `avm_gpu_pcwiener_filter()`, host-derived tap geometry |
@@ -131,7 +142,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_itxfm_test.c` | parity gate against `inv_txfm_c()` |
 | `test/avm_gpu_inter_test.c` | parity gate against `avm_highbd_convolve8_c()` and the A64 blend |
 | `test/avm_gpu_warp_test.c` | parity gate against `av2_highbd_warp_affine_c()` |
-| `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair |
+| `test/avm_gpu_deblock_test.c` | parity gate against the generic lpf pair: thresholds, widths, both bitdepths, both orientations, and the windowed entry point |
 | `test/avm_gpu_cdef_test.c` | parity gate against `av2_cdef_filter_16_{0..3}_c` |
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
 | `test/avm_gpu_pcwiener_test.c` | end-to-end gate against `apply_pc_wiener_highbd()`: class ids, then the restored plane |
@@ -199,6 +210,9 @@ Two seams, selected by `AV2_GPU_SAD`:
 | `AV2_GPU_VAR_MEMO=0` | `avm_gpu/vulkan_hook_var.c` | disable the content-keyed memo (A/B switch) |
 | `AV2_GPU_SAD_RESIDENT=0` | `avm_gpu/vulkan_hook.c` | drop source-block residency inside a search (A/B switch) |
 | `AV2_GPU_SAD_LOOKAHEAD=0` | `av2/encoder/mcomp.c` | one dispatch per search step instead of one per two steps (A/B switch, also a ctest case) |
+| `AV2_GPU_DEBLOCK=1` | `av2/common/av2_loopfilter.c` | every generic deblock edge (`av2_filter_block_plane_{vert,horz}` and the TIP pass) runs one windowed dispatch |
+| `AV2_GPU_DEBLOCK_STATS=1` | `avm_gpu/vulkan_hook_deblock.c` | print the number of edges filtered on the GPU at exit |
+| `AV2_GPU_DEBLOCK_VERIFY=1` | `avm_gpu/vulkan_hook_deblock.c` | run the C filter on the same window and report every differing sample, keeping the C result |
 
 Both entries fall through to the exact CPU SAD when no device initialises, so a
 machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
@@ -376,7 +390,8 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] inter 8-tap subpel convolve + parity gate (6 subpel positions x 5 sizes)
 - [x] inter scaled reference (steps 1..64), compound A64 blend, weighted (CWP)
       compound, warp affine (luma + chroma, regular + extended-range filters)
-- [x] generic deblock (horizontal + vertical) + parity gate (378 cases)
+- [x] generic deblock (horizontal + vertical) + parity gate (122,880 cases,
+      8 and 10 bit, thresholds 1..16 plus random pairs, windowed entry point)
 - [x] CDEF block filter + parity gate (5760 cases)
 - [x] CCSO block pass + parity gate (1008 cases)
 - [x] PC-Wiener restoration filter stage + parity gate (2 geometries x 4 filter
@@ -466,9 +481,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   Measured: a 3,520-sample window uploads as 7,040 bytes instead of 14,080.
   Not packed, on purpose: intra reads only the neighbour row/column (a few
   hundred bytes per call), the inverse transform reads 32-bit coefficients
-  (packing them would truncate), and deblock/CDEF/CCSO are gate-only modules
-  whose seams are not wired into an encode, so packing them would change no
-  stream. A device-local arena exists for SAD and variance, but the rest use
+  (packing them would truncate), deblock uploads one 4x21 window per edge
+  (168 bytes per call, below a dispatch), and CDEF/CCSO are still gate-only
+  modules whose seams are not wired into an encode, so packing them would change
+  no stream. A device-local arena exists for SAD and variance, but the rest use
   host-visible buffers and re-upload per call.
 - Scaled compound is live. The SIGBUS that blocked it was a reproducer bug -
   it passed `scaled=0` together with a 1/1024 step (910), so the seam's window

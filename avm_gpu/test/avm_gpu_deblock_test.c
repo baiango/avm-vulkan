@@ -26,7 +26,8 @@
 
 #define SIDE 48
 #define STRIDE SIDE
-#define BD 10
+#define BD_10 10
+#define BD_8 8
 
 static unsigned int rng_state = 0x2545f491u;
 static unsigned int rnd(void) {
@@ -38,9 +39,6 @@ int main(void) {
   static const int kWidths[8][2] = { { 4, 4 },  { 8, 8 },   { 4, 8 },
                                      { 8, 10 }, { 10, 14 }, { 14, 18 },
                                      { 18, 18 }, { 0, 4 } };
-  /* q = 4 is what the encoder passes on most edges; it used to be missing. */
-  static const int kQ[4] = { 4, 8, 24, 63 };
-  static const int kSide[3] = { 4, 16, 40 };
   static const int kLL[3][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 } };
 
   char err[AVM_GPU_ERR_LEN];
@@ -65,68 +63,138 @@ int main(void) {
   const int x = 20, y = 20;
   int cases = 0, failures = 0, filtered = 0;
 
+  /* Every (q, side) the encoder realistically sends, plus a 16-bit thorough
+   * sweep: a small q is what exposes the threshold comparisons, and the earlier
+   * sweep at q >= 8 missed two kernel defects. */
+  enum { MAX_PAIRS = 4096 };
+  static int pairs[MAX_PAIRS][2];
+  int npairs = 0;
+  for (int qv = 1; qv <= 16; qv++) {
+    for (int sv = 1; sv <= 16; sv++) {
+      pairs[npairs][0] = qv;
+      pairs[npairs][1] = sv;
+      npairs++;
+    }
+  }
+  for (int i = 0; i < 1024; i++) {
+    pairs[npairs][0] = 1 + (int)(rnd() % 63);
+    pairs[npairs][1] = 1 + (int)(rnd() % 63);
+    npairs++;
+  }
+
   for (size_t w = 0; w < sizeof(kWidths) / sizeof(kWidths[0]); w++) {
-    for (size_t q = 0; q < 4; q++) {
-      for (size_t s = 0; s < 3; s++) {
-        for (size_t l = 0; l < 3; l++) {
-          for (int vertical = 0; vertical < 2; vertical++) {
-            for (int yy = 0; yy < SIDE; yy++) {
-              for (int xx = 0; xx < SIDE; xx++) {
-                const int side = vertical ? (xx < x) : (yy < y);
-                plane[yy * SIDE + xx] =
-                    (uint16_t)(512 + (side ? 0 : 5) + (int)(rnd() % 3));
-              }
-            }
-            memcpy(cpu, plane, sizeof(uint16_t) * SIDE * SIDE);
-            const uint16_t qv = (uint16_t)kQ[q];
-            const uint16_t sv = (uint16_t)kSide[s];
-            if (vertical) {
-              avm_highbd_lpf_vertical_generic_c(cpu + y * STRIDE + x, STRIDE,
-                                                kWidths[w][0], kWidths[w][1],
-                                                &qv, &sv, BD, kLL[l][0],
-                                                kLL[l][1]);
-            } else {
-              avm_highbd_lpf_horizontal_generic_c(
-                  cpu + y * STRIDE + x, STRIDE, kWidths[w][0], kWidths[w][1],
-                  &qv, &sv, BD, kLL[l][0], kLL[l][1]);
-            }
-
-            if (avm_gpu_deblock_generic(ctx, db, plane, STRIDE, SIDE, x, y,
-                                        kWidths[w][0], kWidths[w][1], kQ[q],
-                                        kSide[s], BD, kLL[l][0], kLL[l][1],
-                                        vertical, gpu, err) != 0) {
-              fprintf(stderr, "avm_gpu deblock: %s\n", err);
-              return 1;
-            }
-
-            int diff = 0, touched = 0;
-            for (int i = 0; i < SIDE * SIDE; i++) {
-              if (cpu[i] != gpu[i]) diff++;
-              if (cpu[i] != plane[i]) touched++;
-            }
-            cases++;
-            /* Random samples make filt_choice() return 0 almost always, so an
-             * earlier revision of this gate passed without filtering anything
-             * (a deliberate kernel control went unnoticed). The counter below
-             * makes a vacuous sweep a failure. */
-            filtered += touched != 0;
-            if (diff) {
-              failures++;
-              if (failures < 6) {
-                printf(
-                    "  %s w(%d,%d) q%d s%d ll(%d,%d): %d samples differ\n",
-                    vertical ? "vertical" : "horizontal", kWidths[w][0],
-                    kWidths[w][1], kQ[q], kSide[s], kLL[l][0], kLL[l][1], diff);
-              }
+    for (int pi = 0; pi < npairs; pi++) {
+      for (size_t l = 0; l < 3; l++) {
+        for (int bidx = 0; bidx < 2; bidx++) {
+        const int BD = bidx ? BD_8 : BD_10;
+        for (int vertical = 0; vertical < 2; vertical++) {
+          for (int yy = 0; yy < SIDE; yy++) {
+            for (int xx = 0; xx < SIDE; xx++) {
+              const int side = vertical ? (xx < x) : (yy < y);
+              plane[yy * SIDE + xx] =
+                  (uint16_t)(512 + (side ? 0 : 5) + (int)(rnd() % 3));
             }
           }
+          memcpy(cpu, plane, sizeof(uint16_t) * SIDE * SIDE);
+          const uint16_t qv = (uint16_t)pairs[pi][0];
+          const uint16_t sv = (uint16_t)pairs[pi][1];
+          if (vertical) {
+            avm_highbd_lpf_vertical_generic_c(
+                cpu + y * STRIDE + x, STRIDE, kWidths[w][0], kWidths[w][1], &qv,
+                &sv, BD, kLL[l][0], kLL[l][1]);
+          } else {
+            avm_highbd_lpf_horizontal_generic_c(
+                cpu + y * STRIDE + x, STRIDE, kWidths[w][0], kWidths[w][1], &qv,
+                &sv, BD, kLL[l][0], kLL[l][1]);
+          }
+
+          if (avm_gpu_deblock_generic(ctx, db, plane, STRIDE, SIDE, x, y,
+                                      kWidths[w][0], kWidths[w][1], qv, sv, BD,
+                                      kLL[l][0], kLL[l][1], vertical, gpu,
+                                      err) != 0) {
+            fprintf(stderr, "avm_gpu deblock: %s\n", err);
+            return 1;
+          }
+
+          int diff = 0, touched = 0;
+          for (int i = 0; i < SIDE * SIDE; i++) {
+            if (cpu[i] != gpu[i]) diff++;
+            if (cpu[i] != plane[i]) touched++;
+          }
+          cases++;
+          /* Random samples make filt_choice() return 0 almost always, so an
+           * earlier revision of this gate passed without filtering anything
+           * (a deliberate kernel control went unnoticed). The counter below
+           * makes a vacuous sweep a failure. */
+          filtered += touched != 0;
+          if (diff) {
+            failures++;
+            if (failures < 12) {
+              printf("  %s bd%d w(%d,%d) q%d s%d ll(%d,%d): %d samples differ\n",
+                     vertical ? "vertical" : "horizontal", BD, kWidths[w][0],
+                     kWidths[w][1], qv, sv, kLL[l][0], kLL[l][1], diff);
+            }
+          }
+        }
         }
       }
     }
   }
 
+  /* The encode path uses the windowed entry point: same input, only the
+   * filter's reach is uploaded. It must agree with the whole-plane one. */
+  int wcases = 0, wfail = 0;
+  for (size_t w = 0; w < sizeof(kWidths) / sizeof(kWidths[0]); w++) {
+    for (size_t l = 0; l < 3; l++) {
+      for (int vertical = 0; vertical < 2; vertical++) {
+        for (int yy = 0; yy < SIDE; yy++) {
+          for (int xx = 0; xx < SIDE; xx++) {
+            const int side = vertical ? (xx < x) : (yy < y);
+            plane[yy * SIDE + xx] =
+                (uint16_t)(512 + (side ? 0 : 5) + (int)(rnd() % 3));
+          }
+        }
+        memcpy(cpu, plane, sizeof(uint16_t) * SIDE * SIDE);
+        memcpy(gpu, plane, sizeof(uint16_t) * SIDE * SIDE);
+        const int qv = 4 + (int)(rnd() % 8);
+        const int sv = 4 + (int)(rnd() % 12);
+        const uint16_t q16 = (uint16_t)qv, s16 = (uint16_t)sv;
+        if (vertical) {
+          avm_highbd_lpf_vertical_generic_c(cpu + y * STRIDE + x, STRIDE,
+                                            kWidths[w][0], kWidths[w][1], &q16,
+                                            &s16, BD_8, kLL[l][0], kLL[l][1]);
+        } else {
+          avm_highbd_lpf_horizontal_generic_c(
+              cpu + y * STRIDE + x, STRIDE, kWidths[w][0], kWidths[w][1], &q16,
+              &s16, BD_8, kLL[l][0], kLL[l][1]);
+        }
+        if (avm_gpu_deblock_window(ctx, db, plane + y * STRIDE + x,
+                                   vertical ? 1 : STRIDE,
+                                   vertical ? STRIDE : 1, kWidths[w][0],
+                                   kWidths[w][1], qv, sv, BD_8, kLL[l][0],
+                                   kLL[l][1], gpu + y * STRIDE + x, err) != 0) {
+          fprintf(stderr, "avm_gpu deblock window: %s\n", err);
+          return 1;
+        }
+        int diff = 0;
+        for (int i = 0; i < SIDE * SIDE; i++) diff += cpu[i] != gpu[i];
+        wcases++;
+        if (diff) {
+          wfail++;
+          if (wfail < 6) {
+            printf("  window %s w(%d,%d) q%d s%d ll(%d,%d): %d differ\n",
+                   vertical ? "vertical" : "horizontal", kWidths[w][0],
+                   kWidths[w][1], qv, sv, kLL[l][0], kLL[l][1], diff);
+          }
+        }
+      }
+    }
+  }
+  failures += wfail;
+  printf("  window: %d cases, %d differ\n", wcases, wfail);
+
   printf("%-10s %8s %s\n", "filter", "cases", failures ? "MISMATCH" : "ok");
-  printf("  generic deblock: %d cases\n", cases);
+  printf("  generic deblock: %d cases, %d filtered\n", cases, filtered);
 
   free(plane);
   free(cpu);
