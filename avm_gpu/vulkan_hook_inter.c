@@ -43,6 +43,7 @@ typedef struct inter_hook_state {
   unsigned long fwd_txfm;
   unsigned long d16_blends;
   unsigned long warped_scaled;
+  unsigned long compound_scaled;
   unsigned long warped_compound;
 } inter_hook_state;
 
@@ -54,10 +55,11 @@ static void print_stats(void) {
     fprintf(stderr,
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
             "%lu masked blends, %lu warped, %lu forward transforms, %lu "
-            "masked compound, %lu scaled warped, %lu compound warped C)\n",
+            "masked compound, %lu scaled warped, %lu compound warped C, %lu "
+            "scaled compound)\n",
             g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped,
             g_hook.fwd_txfm, g_hook.d16_blends, g_hook.warped_scaled,
-            g_hook.warped_compound);
+            g_hook.warped_compound, g_hook.compound_scaled);
   }
 }
 
@@ -120,10 +122,8 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
   if (is_compound && !conv_dst) return 0;
   /* A scaled reference's compound prediction is not the CWP family: the C
    * facade sends every scaled call, compound or not, through
-   * av2_highbd_convolve_2d_scale(), while the CWP kernel models
-   * av2_highbd_cwp_convolve_*_c() (the unscaled compound path). Those calls
-   * stay on the CPU until the scale convolve has its own compound pass. */
-  if (is_compound && scaled) return 0;
+   * av2_highbd_convolve_2d_scale(), so it takes the sr kernel's compound
+   * output stage (conv buffer + average), not the CWP kernel. */
   /* An unscaled call must carry 1/16 steps: anything else would make the window
    * arithmetic below (which divides by the subpel bit count) read far outside
    * the caller's plane. A scaled call's steps are bounded by 1 << 10. */
@@ -170,7 +170,15 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
      * mapping. */
     if (rows > h + 2 * HOOK_BORDER + 3) return 0;
     int rc;
-    if (is_compound) {
+    if (is_compound && scaled) {
+      const int uneven =
+          fwd_offset != (1 << (4 - 1)) || bck_offset != (1 << (4 - 1));
+      rc = avm_gpu_inter_convolve_scaled_compound(
+          g_hook.ctx, g_hook.inter, window, src_stride, rows, HOOK_BORDER,
+          HOOK_BORDER, filter_x, filter_y, subpel_x_qn, x_step_qn, subpel_y_qn,
+          y_step_qn, w, h, bd, round_0, round_1, conv_dst, conv_stride,
+          do_average, uneven, fwd_offset, bck_offset, dst, dst_stride, err);
+    } else if (is_compound) {
       const int uneven =
           fwd_offset != (1 << (4 - 1)) || bck_offset != (1 << (4 - 1));
       rc = avm_gpu_inter_cwp_convolve(
@@ -199,7 +207,10 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     }
     if (rc == 0) {
       g_hook.blocks++;
-      if (is_compound) g_hook.compound++;
+      if (is_compound) {
+        g_hook.compound++;
+        if (scaled) g_hook.compound_scaled++;
+      }
       handled = 1;
     }
   }

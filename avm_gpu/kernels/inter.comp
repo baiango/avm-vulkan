@@ -13,6 +13,8 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) readonly buffer Src { uint s[]; };
 layout(std430, binding = 1) readonly buffer Filt { int f[]; };
 layout(std430, binding = 2) writeonly buffer Dst { uint d[]; };
+// High-precision compound buffer (only used when compound != 0).
+layout(std430, binding = 3) buffer Conv { uint conv[]; };
 
 layout(push_constant) uniform PC {
   uint src_stride;
@@ -31,6 +33,12 @@ layout(push_constant) uniform PC {
   uint round1;
   uint fvo;     // offset of the vertical filter table in units of 8 taps
   uint sb;      // subpel position bits: 4 (1/16) or 10 (1/1024, scaled refs)
+  uint compound;    // 1 = av2_highbd_convolve_2d_scale_c() with is_compound
+  uint do_average;  // second reference: average with the conv buffer
+  uint conv_stride;
+  uint uneven;      // weighted average with fwd/bck (else (a + b) >> 1)
+  int fwd;
+  int bck;
 } pc;
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
@@ -82,10 +90,34 @@ void main() {
   }
   // av2_highbd_convolve_2d_sr_c(): round by round_1, subtract the bias the
   // two rounded passes injected, then round by the remaining bits.
+  const int bits = 14 - r0 - r1;
+  if (pc.compound != 0u) {
+    /* av2_highbd_convolve_2d_scale_c() with conv_params->is_compound: the
+     * rounded vertical sum goes to the CONV_BUF_TYPE buffer (uint16), and the
+     * second reference averages it with its own sum, subtracts the round
+     * offset and rounds by the remaining bits (ROUND_POWER_OF_TWO, i.e.
+     * +half then an arithmetic shift, not away from zero). */
+    const int c = ((vsum + (1 << (r1 - 1))) >> r1) & 0xffff;
+    const int offset_bits = int(pc.bd) + 14 - r0;
+    const uint cidx = uint(y) * pc.conv_stride + uint(x);
+    if (pc.do_average == 0u) {
+      conv[cidx] = uint(c);
+      return;
+    }
+    int tmp = int(conv[cidx]);
+    if (pc.uneven != 0u) {
+      tmp = (tmp * pc.fwd + c * pc.bck) >> 4;  // DIST_PRECISION_BITS
+    } else {
+      tmp = (tmp + c) >> 1;
+    }
+    tmp -= (1 << (offset_bits - r1)) + (1 << (offset_bits - r1 - 1));
+    if (bits > 0) tmp = (tmp + (1 << (bits - 1))) >> bits;
+    d[y * ds + x] = uint(clipval(tmp, maxv));
+    return;
+  }
   int res = ((vsum + (1 << (r1 - 1))) >> r1) -
             ((1 << (int(pc.bd) + 14 - r0 - r1)) +
              (1 << (int(pc.bd) + 13 - r0 - r1)));
-  const int bits = 14 - r0 - r1;
   if (bits > 0) {
     const int rb = 1 << (bits - 1);
     res = res < 0 ? -((-res + rb) >> bits) : ((res + rb) >> bits);

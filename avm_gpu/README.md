@@ -100,7 +100,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_txfm.{h,c}` | resident residual plane + batched forward DCT (4x4/8x8) |
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4..64 with reconstruction add (`avm_gpu_itxfm_add_tx()` for the 64-wide/tall sizes) |
-| `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference, and compound A64 blending |
+| `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference and its compound pass (conv buffer + average), and compound A64 blending |
 | `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
@@ -408,6 +408,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
+- Compound warped prediction (a warp on a two-reference block, 2,406 / 3,456
+  blocks at cpu-used 8 / 2) still runs on the CPU: it writes a high-precision
+  buffer and the warp kernels model single-reference output.
 - Data model: packed 16-bit storage covers SAD, variance and the forward DCT;
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
@@ -435,11 +438,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   `last_base + 8`), which corrupted the last row of blocks. Both are covered:
   the multiply by an explicit `avm_gpu_warp_test` regression case, the window by
   the resized-stream gate (each was reintroduced and the gates failed).
-- A scaled reference's **compound** prediction runs on the CPU on purpose: the C
+- A scaled reference's **compound** prediction is not the CWP family: the C
   facade sends every scaled call, compound or not, through
-  `av2_highbd_convolve_2d_scale()`, while the CWP kernel models
-  `av2_highbd_cwp_convolve_*_c()`, the unscaled compound path. The seam declines
-  those calls (the stats line counts the handled ones).
+  `av2_highbd_convolve_2d_scale()`. `kernels/inter.comp` now has that compound
+  output stage (16-bit conv buffer for the first reference, weighted or plain
+  average with the second, round offset, `ROUND_POWER_OF_TWO`), gated by
+  `avm_gpu_inter_seam_test` against `av2_highbd_convolve_2d_scale_c()` with
+  compound params, and live: resizing only the key frame
+  (`--resize-mode=1 --resize-kf-denominator=9`) makes the inter frames predict
+  from it, 12,166 compound blocks over a scaled reference on the GPU, bitstream
+  unchanged (md5 c4ee981d..., and 66,107 / 84,469 at cpu-used 2).
 - Wedge-mask blending is wired for both paths: `combine_interintra_highbd()`
   (the A64 blend) and `build_masked_compound_no_round()` (the d16 masked
   compound). The encoder only builds inter-intra masks at slower presets

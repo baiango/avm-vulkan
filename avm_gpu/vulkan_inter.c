@@ -52,8 +52,8 @@ struct avm_gpu_inter {
   VkDeviceSize s0_cap, s1_cap, mask_cap, bdst_cap;
   uint32_t *scratch;
   size_t scratch_cap;
-  avm_gpu_buf src, filt, dst;
-  VkDeviceSize src_cap, filt_cap, dst_cap;
+  avm_gpu_buf src, filt, dst, conv;
+  VkDeviceSize src_cap, filt_cap, dst_cap, conv_cap;
   uint32_t *expand;
   size_t expand_cap;
 };
@@ -61,6 +61,8 @@ struct avm_gpu_inter {
 typedef struct push_constants {
   uint32_t src_stride, dst_stride, sx, sy, w, h, bd, x0, y0, x_step, y_step,
       sr, round0, round1, fvo, sb;
+  uint32_t compound, do_average, conv_stride, uneven;
+  int32_t fwd, bck;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -87,7 +89,7 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_INTER_SPV_PATH, "AVM_GPU_INTER_SPV",
-                              3, sizeof(push_constants), &in->pipe,
+                              4, sizeof(push_constants), &in->pipe,
                               err) != 0) {
     free(in);
     return -1;
@@ -136,7 +138,9 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                          int y0_q4, int x_step_q4, int y_step_q4, int w, int h,
                          int bd, uint16_t *dst, int dst_stride, int sr,
                          int round0, int round1, const int16_t *filter_y,
-                         int subpel_bits, char err[AVM_GPU_ERR_LEN]) {
+                         int subpel_bits, char err[AVM_GPU_ERR_LEN],
+                         const uint16_t *conv, int conv_stride, int do_average,
+                         int uneven, int fwd, int bck) {
   if (!src || !filter || !dst) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
@@ -181,11 +185,17 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
 
   const int filt_entries = filter_y ? 2 * INTER_FILTER_ENTRIES : INTER_FILTER_ENTRIES;
+  /* The shader always declares the conv binding, so a single-reference call
+   * binds a dummy. It has to be block-sized: with a one-entry (4-byte) range
+   * the sr path came back with garbage on MoltenVK (zeros and clips in some
+   * columns), while 64x64 works for every sr and scaled case. */
+  const size_t conv_n = conv ? (size_t)conv_stride * (size_t)h : 64 * 64;
   if (ensure_buf(ctx, &in->src, &in->src_cap, (VkDeviceSize)pixels * 4, err) ||
       ensure_buf(ctx, &in->filt, &in->filt_cap,
                  (VkDeviceSize)filt_entries * 4, err) ||
       ensure_buf(ctx, &in->dst, &in->dst_cap,
-                 (VkDeviceSize)dst_stride * h * 4, err)) {
+                 (VkDeviceSize)dst_stride * h * 4, err) ||
+      ensure_buf(ctx, &in->conv, &in->conv_cap, (VkDeviceSize)conv_n * 4, err)) {
     return -1;
   }
   memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
@@ -197,8 +207,12 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
     }
   }
   memset(in->dst.mapped, 0, (size_t)dst_stride * h * 4);
+  if (conv) {
+    uint32_t *cv = in->conv.mapped;
+    for (size_t i = 0; i < conv_n; i++) cv[i] = conv[i];
+  }
 
-  const avm_gpu_buf bufs[3] = { in->src, in->filt, in->dst };
+  const avm_gpu_buf bufs[4] = { in->src, in->filt, in->dst, in->conv };
   push_constants pc = { (uint32_t)src_stride,
                         (uint32_t)dst_stride,
                         (uint32_t)sx,
@@ -214,10 +228,16 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                         (uint32_t)round0,
                         (uint32_t)round1,
                         (uint32_t)(filter_y ? INTER_FILTER_ENTRIES : 0),
-                        (uint32_t)subpel_bits };
+                        (uint32_t)subpel_bits,
+                        (uint32_t)(conv ? 1 : 0),
+                        (uint32_t)(do_average ? 1 : 0),
+                        (uint32_t)conv_stride,
+                        (uint32_t)(uneven ? 1 : 0),
+                        fwd,
+                        bck };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
-  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 3, &pc,
+  const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 4, &pc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
@@ -225,6 +245,16 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
+    }
+  }
+  if (conv && !do_average) {
+    /* The first reference's output is the high-precision buffer. */
+    const uint32_t *cv = in->conv.mapped;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        ((uint16_t *)conv)[(size_t)y * conv_stride + x] =
+            (uint16_t)cv[(size_t)y * conv_stride + x];
+      }
     }
   }
   return 0;
@@ -371,7 +401,7 @@ int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                                   int dst_stride, char err[AVM_GPU_ERR_LEN]) {
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter, x0_q4,
                        y0_q4, x_step_q4, y_step_q4, w, h, bd, dst, dst_stride, 0,
-                       0, 0, NULL, 4, err);
+                       0, 0, NULL, 4, err, NULL, 0, 0, 0, 0, 0);
 }
 
 int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
@@ -385,7 +415,8 @@ int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
    * the intermediate is 16-bit without the inter-pass clip. */
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
                        subpel_x_qn, subpel_y_qn, 16, 16, w, h, bd, dst,
-                       dst_stride, 1, round0, round1, filter_y, 4, err);
+                       dst_stride, 1, round0, round1, filter_y, 4, err, NULL, 0,
+                       0, 0, 0, 0);
 }
 
 int avm_gpu_inter_convolve_scaled_sr(
@@ -399,7 +430,28 @@ int avm_gpu_inter_convolve_scaled_sr(
    * unscaled sr path. */
   return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
                        subpel_x_qn, subpel_y_qn, x_step_qn, y_step_qn, w, h, bd,
-                       dst, dst_stride, 1, round0, round1, filter_y, 10, err);
+                       dst, dst_stride, 1, round0, round1, filter_y, 10, err,
+                       NULL, 0, 0, 0, 0, 0);
+}
+
+int avm_gpu_inter_convolve_scaled_compound(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int x_step_qn, int subpel_y_qn,
+    int y_step_qn, int w, int h, int bd, int round0, int round1,
+    uint16_t *conv, int conv_stride, int do_average, int uneven, int fwd,
+    int bck, uint16_t *dst, int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  if (!conv) {
+    snprintf(err, AVM_GPU_ERR_LEN, "compound needs a conv buffer");
+    return -1;
+  }
+  /* av2_highbd_convolve_2d_scale_c() with conv_params->is_compound: the same
+   * two-pass filter as the single reference, but the first reference writes
+   * the 16-bit buffer and the second averages it with its own sum. */
+  return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
+                       subpel_x_qn, subpel_y_qn, x_step_qn, y_step_qn, w, h, bd,
+                       dst, dst_stride, 1, round0, round1, filter_y, 10, err,
+                       conv, conv_stride, do_average, uneven, fwd, bck);
 }
 
 int avm_gpu_inter_cwp_convolve(

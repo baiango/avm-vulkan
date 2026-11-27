@@ -205,6 +205,34 @@ if [ -z "$lrcalls" ] || [ "$lrcalls" -le 0 ]; then
   exit 1
 fi
 
+# Seventh call site: compound prediction over a scaled reference. Resizing only
+# the key frame makes the inter frames (full size) predict from it, so compound
+# blocks reference a scaled frame: the C facade routes those through
+# av2_highbd_convolve_2d_scale() with is_compound, not the CWP family.
+KF_ARGS="--limit=5 --good --cpu-used=8 --passes=1 --threads=1 --resize-mode=1 --resize-kf-denominator=9"
+if ! "$AVMENC" $KF_ARGS -o "$work/kf_cpu.ivf" "$work/motion.y4m" \
+    >"$work/kf_cpu.log" 2>&1; then
+  echo "FAIL: CPU scaled-compound encode failed"
+  tail -20 "$work/kf_cpu.log"
+  exit 1
+fi
+if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $KF_ARGS \
+    -o "$work/kf_gpu.ivf" "$work/motion.y4m" >"$work/kf.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/kf.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU scaled-compound encode failed"
+  tail -20 "$work/kf.log"
+  exit 1
+fi
+kfcalls=$(sed -n 's/.* \([0-9][0-9]*\) scaled compound.*/\1/p' "$work/kf.log")
+if [ -z "$kfcalls" ] || [ "$kfcalls" -le 0 ]; then
+  echo "FAIL: no compound block over a scaled reference ran on the GPU"
+  tail -20 "$work/kf.log"
+  exit 1
+fi
+
 hash_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | cut -d' ' -f1
@@ -272,6 +300,10 @@ echo "lr bitstream   : $(wc -c <"$work/lr_gpu.ivf" | tr -d ' ') bytes, md5 $lr_h
 
 echo "resized streams: ratios$resize_counts (scaled warped blocks), md5$resize_md5s (cpu/gpu)"
 
+kf_cpu_hash=$(hash_of "$work/kf_cpu.ivf")
+kf_hash=$(hash_of "$work/kf_gpu.ivf")
+echo "scaled compound: $(wc -c <"$work/kf_gpu.ivf" | tr -d ' ') bytes, md5 $kf_hash ($kfcalls compound blocks over a scaled reference)"
+
 var_hash=$(hash_of "$work/var.ivf")
 echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"
 
@@ -281,6 +313,10 @@ if [ "$cpu_hash" != "$gpu_hash" ]; then
 fi
 if [ "$cpu_hash" != "$var_hash" ]; then
   echo "FAIL: variance bitstreams differ"
+  exit 1
+fi
+if [ "$kf_cpu_hash" != "$kf_hash" ]; then
+  echo "FAIL: scaled-compound bitstreams differ"
   exit 1
 fi
 if [ "$lr_cpu_hash" != "$lr_hash" ]; then

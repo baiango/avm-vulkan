@@ -81,6 +81,22 @@ int avm_gpu_inter_convolve_scaled_sr(
  * phase path of av2_highbd_convolve_2d_scale_c() is used, which is what the
  * facade runs for a scaled compound reference.
  */
+/*
+ * Compound prediction over a scaled reference, matching
+ * av2_highbd_convolve_2d_scale_c() with conv_params->is_compound: the first
+ * call (do_average == 0) writes the 16-bit conv buffer, the second averages it
+ * with its own filtered sum (uneven -> weighted with fwd/bck at 1/16) and
+ * writes the pixels. conv is the caller's high-precision buffer,
+ * conv_stride samples per row.
+ */
+int avm_gpu_inter_convolve_scaled_compound(
+    avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
+    int src_rows, int sx, int sy, const int16_t *filter_x,
+    const int16_t *filter_y, int subpel_x_qn, int x_step_qn, int subpel_y_qn,
+    int y_step_qn, int w, int h, int bd, int round0, int round1, uint16_t *conv,
+    int conv_stride, int do_average, int uneven, int fwd, int bck,
+    uint16_t *dst, int dst_stride, char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_cwp_convolve(
     avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *src, int src_stride,
     int src_rows, int sx, int sy, const int16_t *filter_x,

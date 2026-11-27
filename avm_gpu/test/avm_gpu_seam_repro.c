@@ -376,16 +376,8 @@ int main(int argc, char **argv) {
   int declined = 0;
   int first_declined_it = -1;
   const int verbose = getenv("SEAM_VERBOSE") != NULL;
-  int scaled_compound_cpu = 0;
   for (int it = 0; it < iters; it++) {
     const int rc = run_mode(it);
-    if (rc < 0 && (it % 5) == 2 && (it % 6) >= 3) {
-      /* A scaled reference's compound prediction is not the CWP family: the
-       * facade sends it through av2_highbd_convolve_2d_scale(), so the seam
-       * declines it on purpose and the C runs. */
-      scaled_compound_cpu++;
-      continue;
-    }
     if (rc < 0) {
       /* A decline is not a pass: it would let a window that is too small look
        * like agreement, which is exactly how an earlier revision hid. */
@@ -416,9 +408,7 @@ int main(int argc, char **argv) {
     avm_gpu_ctx_destroy(ctx);
     return 1;
   }
-  printf("ok: %d comparisons agree, 0 declined (%d scaled compound blocks "
-         "left to the C)\n",
-         iters, scaled_compound_cpu);
+  printf("ok: %d comparisons agree, 0 declined\n", iters);
   avm_gpu_inter_destroy(ctx, inter);
   avm_gpu_ctx_destroy(ctx);
   return 0;
