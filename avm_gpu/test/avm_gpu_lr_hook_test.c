@@ -130,7 +130,12 @@ int main(void) {
     const int maxv = (1 << bd) - 1;
     for (size_t c = 0; c < sizeof(kCases) / sizeof(kCases[0]); c++) {
       const int w = kCases[c].w, h = kCases[c].h;
-      const int cid_stride = (w + 3) / 4;
+      const int cell_stride = (w + 3) / 4;
+      /* The caller's buffers are MI-indexed, so their strides are wider than
+       * the 4x4 cell grid the classifier works on (the encoder passes the
+       * frame's MI stride). Both are different here on purpose. */
+      const int cid_stride = cell_stride + 5;
+      const int tskip_stride = cell_stride + 3;
       const int cell_rows = (h + 3) / 4;
 
       /* A restoration stripe: the visible area plus PAD samples of real data on
@@ -153,15 +158,15 @@ int main(void) {
       uint16_t *gpu = gpu_buf + PAD * STRIDE + PAD;
       memcpy(ref_buf, src_buf, sizeof(uint16_t) * STRIDE * ROWS);
       memcpy(gpu_buf, src_buf, sizeof(uint16_t) * STRIDE * ROWS);
-      for (int i = 0; i < cid_stride * cell_rows; i++) {
+      for (int i = 0; i < tskip_stride * cell_rows; i++) {
         tskip[i] = (uint8_t)(rnd() & 1);
-        mask[i] = 0;
       }
+      for (int i = 0; i < cell_stride * cell_rows; i++) mask[i] = 0;
       memset(cid_ref, 0, MAXW * MAXH);
       memset(cid_gpu, 0, MAXW * MAXH);
 
       const double t0 = (double)clock() / (double)(CLOCKS_PER_SEC / 1000);
-      apply_pc_wiener_highbd(src, w, h, STRIDE, ref, STRIDE, tskip, cid_stride,
+      apply_pc_wiener_highbd(src, w, h, STRIDE, ref, STRIDE, tskip, tskip_stride,
                              cid_ref, cid_stride, false, bd, false, filters,
                              selector, &buffers, tskip_zero != 0, cm, NULL, 0,
                              0, 0, NULL);
@@ -169,12 +174,12 @@ int main(void) {
           (double)clock() / (double)(CLOCKS_PER_SEC / 1000) - t0;
 
       const int done = avm_gpu_hook_pcwiener(
-          src, w, h, STRIDE, gpu, STRIDE, tskip, cid_stride, cid_gpu,
+          src, w, h, STRIDE, gpu, STRIDE, tskip, tskip_stride, cid_gpu,
           cid_stride, bd, 0, filters, selector,
           &buffers.qval_given_tskip_lut[0][0], buffers.feature_normalizers,
           pc_wiener_thresholds, pc_wiener_lut_to_class_index,
           PC_WIENER_PREC_FEATURE, pc_wiener_threshold_shift, tskip_zero, mask,
-          cid_stride,
+          cell_stride,
           NUM_PC_WIENER_TAPS_LUMA, wienerns_simd_config_y, num_config,
           PC_WIENER_PREC_FILTER);
       if (!done) {
@@ -185,13 +190,16 @@ int main(void) {
 
       int diff = 0;
       int cls_diff = 0;
-      for (int i = 0; i < cid_stride * cell_rows; i++) {
-        if (cid_ref[i] != cid_gpu[i]) {
-          if (cls_diff < 3) {
-            printf("  cls (%d,%d): gpu %u != cpu %u\n", i % cid_stride,
-                   i / cid_stride, cid_gpu[i], cid_ref[i]);
+      for (int by = 0; by < cell_rows; by++) {
+        for (int bx = 0; bx < cell_stride; bx++) {
+          const int i = by * cid_stride + bx;
+          if (cid_ref[i] != cid_gpu[i]) {
+            if (cls_diff < 3) {
+              printf("  cls (%d,%d): gpu %u != cpu %u\n", bx, by, cid_gpu[i],
+                     cid_ref[i]);
+            }
+            cls_diff++;
           }
-          cls_diff++;
         }
       }
       if (cls_diff) printf("  class mismatches %d\n", cls_diff);

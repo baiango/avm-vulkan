@@ -37,6 +37,10 @@ typedef struct lr_hook_state {
   uint16_t plane[LR_MAX_H + 2 * LR_LEAD][LR_STRIDE];
   uint16_t dst_plane[LR_MAX_H + 2 * LR_LEAD][LR_STRIDE];
   uint8_t cells[((LR_MAX_W + 3) / 4) * ((LR_MAX_H + 3) / 4)];
+  /* Classification is computed per 4x4 cell in a compact grid; the caller's
+   * class-id buffer is indexed by MI column (4 samples), so the two strides
+   * differ and the classes are copied across. */
+  uint8_t classes[((LR_MAX_W + 3) / 4) * ((LR_MAX_H + 3) / 4)];
 } lr_hook_state;
 
 static lr_hook_state g_hook;
@@ -138,7 +142,7 @@ int avm_gpu_hook_pcwiener(const uint16_t *dgd, int width, int height,
     cp.thr_shift = thr_shift;
 
     if (avm_gpu_pcwiener_classify(g_hook.ctx, g_hook.pc, &cp, plane,
-                                  tskip_zero ? NULL : tskip, class_id,
+                                  tskip_zero ? NULL : tskip, g_hook.classes,
                                   err) == 0) {
       handled = 1;
       if (!classify_only) {
@@ -152,7 +156,8 @@ int avm_gpu_hook_pcwiener(const uint16_t *dgd, int width, int height,
         fp.lead_rows = LR_LEAD;
         fp.lead_cols = LR_LEAD;
         fp.bd = bd;
-        fp.class_id_stride = class_id_stride;
+        /* The filter reads the compact grid the classifier wrote. */
+        fp.class_id_stride = cell_stride;
         fp.num_sym = num_pixels / 2;
         fp.singleton_index = config[num_pixels - 1][2];
         fp.prec_bits = prec_bits;
@@ -160,11 +165,19 @@ int avm_gpu_hook_pcwiener(const uint16_t *dgd, int width, int height,
         fp.config = config;
         fp.skip_block = g_hook.cells;
         handled = avm_gpu_pcwiener_filter(g_hook.ctx, g_hook.pc, &fp, plane,
-                                          class_id, selector, &filters[0][0],
-                                          dplane, err) == 0;
+                                          g_hook.classes, selector,
+                                          &filters[0][0], dplane, err) == 0;
       }
       if (handled) {
         g_hook.units++;
+        /* Mirror the reference, which stores this procunit's classes in the
+         * caller's buffer at (i >> MI_SIZE_LOG2, j >> MI_SIZE_LOG2). */
+        for (int by = 0; by < cell_rows; by++) {
+          for (int bx = 0; bx < cell_stride; bx++) {
+            class_id[by * class_id_stride + bx] =
+                g_hook.classes[by * cell_stride + bx];
+          }
+        }
         if (!classify_only) {
           for (int y = 0; y < height; y++) {
             memcpy(dst + (size_t)y * dst_stride, &dplane[y * LR_STRIDE],

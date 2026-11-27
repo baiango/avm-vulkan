@@ -176,6 +176,35 @@ if [ -z "$mcalls" ] || [ "$mcalls" -le 0 ]; then
   exit 1
 fi
 
+# Fifth call site: loop restoration. The clips above never make the encoder pick
+# a restoration type, so this one is a noisy clip at a quality where PC-Wiener
+# wins the RD decision; four frames are needed before the filtered reference
+# frame reaches the bitstream (two frames still encode only the key frame).
+python3 "$here/make_noise_clip.py" "$work/noise.y4m"
+LR_ARGS="--limit=4 --good --cpu-used=8 --passes=1 --threads=1"
+if ! "$AVMENC" $LR_ARGS -o "$work/lr_cpu.ivf" "$work/noise.y4m" \
+    >"$work/lr_cpu.log" 2>&1; then
+  echo "FAIL: CPU loop-restoration encode failed"
+  tail -20 "$work/lr_cpu.log"
+  exit 1
+fi
+if ! AV2_GPU_LR=1 AV2_GPU_LR_STATS=1 "$AVMENC" $LR_ARGS \
+    -o "$work/lr_gpu.ivf" "$work/noise.y4m" >"$work/lr.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/lr.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU loop-restoration encode failed"
+  tail -20 "$work/lr.log"
+  exit 1
+fi
+lrcalls=$(sed -n 's/.* \([0-9][0-9]*\) loop-restoration procunits.*/\1/p' "$work/lr.log")
+if [ -z "$lrcalls" ] || [ "$lrcalls" -le 0 ]; then
+  echo "FAIL: the GPU filtered no loop-restoration procunit"
+  tail -20 "$work/lr.log"
+  exit 1
+fi
+
 hash_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | cut -d' ' -f1
@@ -201,6 +230,10 @@ mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")
 echo "mask bitstream : $(wc -c <"$work/mask_gpu.ivf" | tr -d ' ') bytes, md5 $mask_hash ($mcalls masked blends)"
 
+lr_cpu_hash=$(hash_of "$work/lr_cpu.ivf")
+lr_hash=$(hash_of "$work/lr_gpu.ivf")
+echo "lr bitstream   : $(wc -c <"$work/lr_gpu.ivf" | tr -d ' ') bytes, md5 $lr_hash ($lrcalls loop-restoration procunits)"
+
 var_hash=$(hash_of "$work/var.ivf")
 echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"
 
@@ -210,6 +243,10 @@ if [ "$cpu_hash" != "$gpu_hash" ]; then
 fi
 if [ "$cpu_hash" != "$var_hash" ]; then
   echo "FAIL: variance bitstreams differ"
+  exit 1
+fi
+if [ "$lr_cpu_hash" != "$lr_hash" ]; then
+  echo "FAIL: loop-restoration bitstreams differ"
   exit 1
 fi
 if [ "$inter_cpu_hash" != "$inter_hash" ]; then
