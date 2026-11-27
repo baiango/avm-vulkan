@@ -101,7 +101,13 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     const uint16_t *window = src - HOOK_BORDER * src_stride - HOOK_BORDER;
     const int subpel_bits = scaled ? SCALE_SUBPEL_BITS : 4;
     const int last_by = (((h - 1) * y_step_qn) + subpel_y_qn) >> subpel_bits;
-    const int rows = last_by + 2 * HOOK_BORDER + 2;
+    /* Minimum, not slack: the host requires src_rows >= sy + last_base + 4 with
+     * sy == lead == 3, i.e. last_base + 7 rows. Measured with
+     * avm_gpu_seam_repro: last_base + 7 agrees over 800 comparisons, one row
+     * less makes the entry point decline every case (and the reproducer now
+     * treats a decline as a failure, which an earlier revision of it did not -
+     * that is how a short window stayed invisible). */
+    const int rows = last_by + 2 * HOOK_BORDER + 1;
     const int rc =
         scaled ? avm_gpu_inter_convolve_scaled_sr(
                      g_hook.ctx, g_hook.inter, window, src_stride, rows,

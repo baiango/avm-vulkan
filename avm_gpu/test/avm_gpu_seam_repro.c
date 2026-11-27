@@ -130,6 +130,7 @@ int main(int argc, char **argv) {
   }
 
   int declined = 0;
+  int first_declined_it = -1;
   for (int it = 0; it < iters; it++) {
     const int scaled = it & 1;
     const int n = 4 << (it % 5); /* 4, 8, 16, 32, 64 */
@@ -140,6 +141,9 @@ int main(int argc, char **argv) {
 
     const int rc = run_case(scaled, n, sub_x, sub_y, step);
     if (rc < 0) {
+      /* A decline is not a pass: it would let a window that is too small look
+       * like agreement, which is exactly how an earlier revision hid. */
+      if (first_declined_it < 0) first_declined_it = it;
       declined++;
       continue;
     }
@@ -159,8 +163,14 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  printf("ok: %d comparisons agree (%d declined by the seam)\n", iters,
-         declined);
+  if (declined) {
+    printf("FAIL: the seam declined %d of %d cases (first at it=%d)\n", declined,
+           iters, first_declined_it);
+    avm_gpu_inter_destroy(ctx, inter);
+    avm_gpu_ctx_destroy(ctx);
+    return 1;
+  }
+  printf("ok: %d comparisons agree, 0 declined\n", iters);
   avm_gpu_inter_destroy(ctx, inter);
   avm_gpu_ctx_destroy(ctx);
   return 0;

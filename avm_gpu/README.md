@@ -386,15 +386,21 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.
-- The inter seam's upload window is sized `last_base_y + 8` rows, which is one
-  more than the tap span suggests, deliberately: while investigating an
-  intermittent hook-vs-C disagreement I could not establish the exact floor
-  from the arithmetic alone, and a seam test that is one row short was *not*
-  detected by the comparison, so the slack is kept rather than tuned. The seam
-  test does catch real disagreements (it failed every run while an earlier
-  scaled attempt was wrong) and now passes 400 comparisons x 4 runs with blocks
-  from 4x4 to 64x64, scaled and unscaled. Measuring the true minimum and
-  dropping the slack is the open follow-up.
+- The inter seam's upload window is `last_base_y + 7` rows, which is the exact
+  minimum the entry point enforces (`sy + last_base + 4 <= rows`, `sy == 3`),
+  not slack. Measured: `last_base_y + 7` agrees over 800 comparisons, one row
+  less makes the seam decline every case. The seam test treats a decline as a
+  failure - an earlier revision of it counted declines as passes, which is why
+  an under-sized window looked clean.
+- **Compound prediction is not a seam extension.** AVM 1.0 does not produce two
+  sr predictors and blend them: with `conv_params->is_compound`,
+  `av2_highbd_convolve_2d_facade()` dispatches to the CWP family
+  (`av2_highbd_cwp_convolve_2d/x/y/copy`), which writes the *high-precision*
+  `CONV_BUF_TYPE` buffer on the first pass and does the (optionally uneven
+  weighted, `DIST_PRECISION_BITS`) average in the second, subtracting the two
+  pass biases before the final rounding. Bridging it needs a new kernel for that
+  two-pass path; `compound.comp` (`avm_highbd_blend_a64_mask_c`) is a different
+  operation and cannot be substituted.
 - Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
   which serves both the encoder and the decoder) and the seam is gated, but no
   end-to-end stream gate exists yet: with the settings in this repo the encoder
