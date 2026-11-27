@@ -21,13 +21,16 @@ layout(push_constant) uniform PC {
   uint sx, sy;      // block origin inside the uploaded plane
   uint round0, round1;
   uint do_average, uneven, fwd, bck, conv_index;
+  uint mode;  // 0 = 2D, 1 = x only, 2 = y only, 3 = copy (no subpel)
 } pc;
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
 
+// ROUND_POWER_OF_TWO (avm_ports/mem.h): (v + half) >> n, arithmetic shift, so
+// negative values floor - unlike the _SIGNED variant. The CWP paths use this
+// one, including for values that can go negative.
 int round_pow2(int v, int n) {
-  int rnd = 1 << (n - 1);
-  return v < 0 ? -((-v + rnd) >> n) : ((v + rnd) >> n);
+  return (v + (1 << (n - 1))) >> n;
 }
 
 void main() {
@@ -45,21 +48,50 @@ void main() {
   const int fh = int(pc.x0) * 8;
   const int fv = 128 + int(pc.y0) * 8;
 
-  int im[8];
-  const int hbias = 1 << (bd + 6);   // 1 << (bd + FILTER_BITS - 1)
-  for (int ky = 0; ky < 8; ++ky) {
-    const int row = int(pc.sy) + y + ky - 3;
-    int sum = hbias;
-    for (int kx = 0; kx < 8; ++kx) {
-      sum += f[fh + kx] * int(s[row * ss + int(pc.sx) + x + kx - 3]);
-    }
-    im[ky] = (round_pow2(sum, r0) << 16) >> 16;  // stored as int16_t
-  }
-
+  const int mode = int(pc.mode);
   const int offset_bits = bd + 14 - r0;
-  int vsum = 1 << offset_bits;
-  for (int ky = 0; ky < 8; ++ky) vsum += f[fv + ky] * im[ky];
-  const int res = round_pow2(vsum, r1) & 0xffff;  // CONV_BUF_TYPE is uint16_t
+  const int round_offset = (1 << (offset_bits - r1)) +
+                           (1 << (offset_bits - r1 - 1));
+  const int round_bits = 14 - r0 - r1;
+  int res;
+  if (mode == 3) {
+    // av2_highbd_cwp_convolve_2d_copy_c(): both passes are CONV_BUF_TYPE
+    // arithmetic, so the additions wrap at 16 bits.
+    res = (int(s[(int(pc.sy) + y) * ss + int(pc.sx) + x]) << round_bits) & 0xffff;
+    res = (res + round_offset) & 0xffff;
+  } else if (mode == 1) {
+    // av2_highbd_cwp_convolve_x_c(): horizontal only, no vertical bias.
+    int sum = 0;
+    for (int kx = 0; kx < 8; ++kx) {
+      sum += f[fh + kx] *
+             int(s[(int(pc.sy) + y) * ss + int(pc.sx) + x + kx - 3]);
+    }
+    const int hbits = 7 - r1;  // FILTER_BITS - round_1
+    res = ((1 << hbits) * round_pow2(sum, r0) + round_offset) & 0xffff;
+  } else if (mode == 2) {
+    // av2_highbd_cwp_convolve_y_c(): vertical only, no bias, scaled before
+    // the round.
+    int sum = 0;
+    for (int ky = 0; ky < 8; ++ky) {
+      sum += f[fv + ky] * int(s[(int(pc.sy) + y + ky - 3) * ss + int(pc.sx) + x]);
+    }
+    const int ybits = 7 - r0;  // FILTER_BITS - round_0
+    res = (round_pow2(sum * (1 << ybits), r1) + round_offset) & 0xffff;
+  } else {
+    int im[8];
+    const int hbias = 1 << (bd + 6);   // 1 << (bd + FILTER_BITS - 1)
+    for (int ky = 0; ky < 8; ++ky) {
+      const int row = int(pc.sy) + y + ky - 3;
+      int sum = hbias;
+      for (int kx = 0; kx < 8; ++kx) {
+        sum += f[fh + kx] * int(s[row * ss + int(pc.sx) + x + kx - 3]);
+      }
+      im[ky] = (round_pow2(sum, r0) << 16) >> 16;  // stored as int16_t
+    }
+    int vsum = 1 << offset_bits;
+    for (int ky = 0; ky < 8; ++ky) vsum += f[fv + ky] * im[ky];
+    res = round_pow2(vsum, r1) & 0xffff;  // CONV_BUF_TYPE is uint16_t
+  }
   const uint idx = uint(y) * pc.dst_stride + uint(x);
   conv[y * int(pc.conv_stride) + x] = uint(res);
   if (pc.conv_index == 0u && pc.do_average == 0u) return;
@@ -71,7 +103,7 @@ void main() {
     const int prev = int(conv[y * int(pc.conv_stride) + x]);
     tmp = pc.uneven != 0u ? (prev * int(pc.fwd) + res * int(pc.bck)) >> 4
                           : (prev + res) >> 1;
-    tmp -= (1 << (offset_bits - r1)) + (1 << (offset_bits - r1 - 1));
+    tmp -= round_offset;
   }
-  d[idx] = uint(clipval(round_pow2(tmp, 14 - r0 - r1), maxv));
+  d[idx] = uint(clipval(round_pow2(tmp, round_bits), maxv));
 }

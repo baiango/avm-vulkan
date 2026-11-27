@@ -50,6 +50,20 @@ void av2_highbd_cwp_convolve_2d_c(const uint16_t *src, int src_stride,
                                   const InterpFilterParams *filter_params_y,
                                   const int subpel_x_qn, const int subpel_y_qn,
                                   ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_x_c(const uint16_t *src, int src_stride,
+                                 uint16_t *dst, int dst_stride, int w, int h,
+                                 const InterpFilterParams *filter_params_x,
+                                 const int subpel_x_qn,
+                                 ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_y_c(const uint16_t *src, int src_stride,
+                                 uint16_t *dst, int dst_stride, int w, int h,
+                                 const InterpFilterParams *filter_params_y,
+                                 const int subpel_y_qn,
+                                 ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_2d_copy_c(const uint16_t *src, int src_stride,
+                                       uint16_t *dst, int dst_stride, int w,
+                                       int h, ConvolveParams *conv_params,
+                                       int bd);
 void av2_highbd_convolve_2d_scale_c(const uint16_t *src, int src_stride,
                                     uint16_t *dst, int dst_stride, int w, int h,
                                     const InterpFilterParams *filter_params_x,
@@ -92,9 +106,20 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
   memset(cpu_out, 0, sizeof(cpu_out));
   memset(gpu_out, 0, sizeof(gpu_out));
   conv.do_average = 0;
-  av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
-                               DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
-                               &conv, BD);
+  if (sub_x == 0 && sub_y == 0) {
+    av2_highbd_cwp_convolve_2d_copy_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                      DST_STRIDE, n, n, &conv, BD);
+  } else if (sub_y == 0) {
+    av2_highbd_cwp_convolve_x_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                DST_STRIDE, n, n, &fp_x, sub_x, &conv, BD);
+  } else if (sub_x == 0) {
+    av2_highbd_cwp_convolve_y_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                DST_STRIDE, n, n, &fp_y, sub_y, &conv, BD);
+  } else {
+    av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                 DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
+                                 &conv, BD);
+  }
   if (!avm_gpu_hook_inter(plane + sy * SRC_W + sx, SRC_W, gpu_out, DST_STRIDE,
                           n, n, BD, (const int16_t *)av2_sub_pel_filters_8,
                           (const int16_t *)av2_sub_pel_filters_8, 8, 8, sub_x,
@@ -110,9 +135,20 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
     }
   }
   conv.do_average = 1;
-  av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
-                               DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
-                               &conv, BD);
+  if (sub_x == 0 && sub_y == 0) {
+    av2_highbd_cwp_convolve_2d_copy_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                      DST_STRIDE, n, n, &conv, BD);
+  } else if (sub_y == 0) {
+    av2_highbd_cwp_convolve_x_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                DST_STRIDE, n, n, &fp_x, sub_x, &conv, BD);
+  } else if (sub_x == 0) {
+    av2_highbd_cwp_convolve_y_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                DST_STRIDE, n, n, &fp_y, sub_y, &conv, BD);
+  } else {
+    av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                 DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
+                                 &conv, BD);
+  }
   if (!avm_gpu_hook_inter(plane + sy * SRC_W + sx, SRC_W, gpu_out, DST_STRIDE,
                           n, n, BD, (const int16_t *)av2_sub_pel_filters_8,
                           (const int16_t *)av2_sub_pel_filters_8, 8, 8, sub_x,
@@ -203,12 +239,16 @@ int main(int argc, char **argv) {
     const int sub_y = scaled ? (int)(rnd() % 1024) : (int)(rnd() % 16);
     for (int i = 0; i < SRC_W * SRC_H; i++) plane[i] = (uint16_t)(rnd() & 0x3ff);
 
+    /* The seam takes compound only for the CWP y-only and 2D shapes; the copy
+     * and x-only paths are kernel-gated but not taken in the encoder context,
+     * so a compound case with a zero y phase is expected to be declined. */
+    const int cwp_y = (sub_y % 15) + 1;   /* 1..15: the seam needs a y phase */
+    const int cwp_x = sub_x % 16;
+    const int expect_decline = mode == 2 && cwp_y == 0; /* never: y >= 1 */
     const int rc = mode == 2
-                       /* the seam only takes compound where the C takes its 2D
-                        * path, i.e. with a non-zero phase on both axes */
-                       ? run_compound(n, sub_x % 15 + 1, sub_y % 15 + 1,
-                                      it % 2)
+                       ? run_compound(n, cwp_x, cwp_y, it % 2)
                        : run_case(scaled, n, sub_x, sub_y, step);
+    if (expect_decline && rc < 0) continue;
     if (rc < 0) {
       /* A decline is not a pass: it would let a window that is too small look
        * like agreement, which is exactly how an earlier revision hid. */

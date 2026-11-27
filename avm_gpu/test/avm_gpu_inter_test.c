@@ -36,6 +36,40 @@ void av2_highbd_cwp_convolve_2d_c(const uint16_t *src, int src_stride,
                                   const InterpFilterParams *filter_params_y,
                                   const int subpel_x_qn, const int subpel_y_qn,
                                   ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_x_c(const uint16_t *src, int src_stride,
+                                 uint16_t *dst, int dst_stride, int w, int h,
+                                 const InterpFilterParams *filter_params_x,
+                                 const int subpel_x_qn,
+                                 ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_y_c(const uint16_t *src, int src_stride,
+                                 uint16_t *dst, int dst_stride, int w, int h,
+                                 const InterpFilterParams *filter_params_y,
+                                 const int subpel_y_qn,
+                                 ConvolveParams *conv_params, int bd);
+void av2_highbd_cwp_convolve_2d_copy_c(const uint16_t *src, int src_stride,
+                                       uint16_t *dst, int dst_stride, int w,
+                                       int h, ConvolveParams *conv_params,
+                                       int bd);
+
+/* The function the facade dispatches to for a given phase. */
+static void cwp_ref(const uint16_t *src, int stride, uint16_t *dst,
+                    int dst_stride, int n, int sub_x, int sub_y, int bd,
+                    ConvolveParams *conv, const InterpFilterParams *fp_x,
+                    const InterpFilterParams *fp_y) {
+  if (sub_x == 0 && sub_y == 0) {
+    av2_highbd_cwp_convolve_2d_copy_c(src, stride, dst, dst_stride, n, n, conv,
+                                      bd);
+  } else if (sub_y == 0) {
+    av2_highbd_cwp_convolve_x_c(src, stride, dst, dst_stride, n, n, fp_x, sub_x,
+                                conv, bd);
+  } else if (sub_x == 0) {
+    av2_highbd_cwp_convolve_y_c(src, stride, dst, dst_stride, n, n, fp_y, sub_y,
+                                conv, bd);
+  } else {
+    av2_highbd_cwp_convolve_2d_c(src, stride, dst, dst_stride, n, n, fp_x, fp_y,
+                                 sub_x, sub_y, conv, bd);
+  }
+}
 void av2_highbd_convolve_2d_scale_c(const uint16_t *src, int src_stride,
                                     uint16_t *dst, int dst_stride, int w, int h,
                                     const InterpFilterParams *filter_params_x,
@@ -401,9 +435,8 @@ int main(void) {
           memset(cpu, 0, sizeof(cpu));
           memset(gpu, 0, sizeof(gpu));
           conv.do_average = 0;
-          av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu,
-                                       DST_STRIDE, n, n, &fp_x, &fp_y,
-                                       kPos[p][0], kPos[p][1], &conv, bd);
+          cwp_ref(plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE, n,
+                  kPos[p][0], kPos[p][1], bd, &conv, &fp_x, &fp_y);
           int diff = 0;
           if (avm_gpu_inter_cwp_convolve(
                   ctx, inter, plane, SRC_W, SRC_H, sx, sy,
@@ -427,9 +460,8 @@ int main(void) {
             }
           }
           conv.do_average = 1;
-          av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu,
-                                       DST_STRIDE, n, n, &fp_x, &fp_y,
-                                       kPos[p][0], kPos[p][1], &conv, bd);
+          cwp_ref(plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE, n,
+                  kPos[p][0], kPos[p][1], bd, &conv, &fp_x, &fp_y);
           if (avm_gpu_inter_cwp_convolve(
                   ctx, inter, plane, SRC_W, SRC_H, sx, sy,
                   (const int16_t *)av2_sub_pel_filters_8,

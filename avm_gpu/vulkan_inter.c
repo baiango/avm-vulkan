@@ -35,7 +35,7 @@
 
 typedef struct cwp_constants {
   uint32_t src_stride, conv_stride, dst_stride, w, h, bd, x0, y0, sx, sy;
-  uint32_t round0, round1, do_average, uneven, fwd, bck, conv_index;
+  uint32_t round0, round1, do_average, uneven, fwd, bck, conv_index, mode;
 } cwp_constants;
 
 struct avm_gpu_inter {
@@ -474,7 +474,9 @@ int avm_gpu_inter_cwp_convolve(
                        (uint32_t)uneven,
                        (uint32_t)fwd,
                        (uint32_t)bck,
-                       (uint32_t)conv_index };
+                       (uint32_t)conv_index,
+                       (uint32_t)(subpel_x_qn == 0 ? (subpel_y_qn == 0 ? 3 : 2)
+                                                  : (subpel_y_qn == 0 ? 1 : 0)) };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwpconv_pipe, bufs, 4,

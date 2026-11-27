@@ -92,13 +92,17 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
   }
   if (src_stride < w + 2 * HOOK_BORDER || dst_stride < w) return 0;
 
-  /* Compound (two passes over the CWP high-precision buffer) is only taken
-   * unscaled and only where the C takes its 2D path: with a zero phase on one
-   * axis AVM switches to av2_highbd_cwp_convolve_x/y/copy, which is a different
-   * rounding, and those stay on the CPU. */
-  if (is_compound &&
-      (scaled || !conv_dst || subpel_x_qn == 0 || subpel_y_qn == 0)) {
-    return 0;
+  /* Compound (two passes over the CWP high-precision buffer) is taken
+   * unscaled; the kernel has a path for each filter shape, matching the
+   * function the C dispatches to (2D, x only, y only, copy). */
+  if (is_compound && (scaled || !conv_dst)) return 0;
+  /* Only the shapes the encoder reproduces bit-exactly are taken. The copy and
+   * x-only CWP paths are kernel-gated against the C (avm_gpu_inter_test) but
+   * change the encoder bitstream when the seam takes them, so they stay on the
+   * CPU until that difference is understood; y-only and 2D are verified. */
+  if (is_compound) {
+    const int copy_or_x_only = subpel_y_qn == 0;
+    if (copy_or_x_only) return 0;
   }
 
   pthread_mutex_lock(&g_lock);
@@ -145,6 +149,10 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                                            subpel_x_qn, subpel_y_qn, w, h, bd,
                                            round_0, round_1, dst, dst_stride,
                                            err);
+    }
+    if (rc != 0 && getenv("AV2_GPU_INTER_DEBUG")) {
+      fprintf(stderr, "avm_gpu: inter fallback %dx%d sub(%d,%d) rows=%d: %s\n", w,
+              h, subpel_x_qn, subpel_y_qn, rows, err);
     }
     if (rc == 0) {
       g_hook.blocks++;
