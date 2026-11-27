@@ -383,10 +383,18 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
-  seam covers single-reference 8-tap prediction, scaled and unscaled; compound,
-  warped and >8-tap encoder-side filters still run on the CPU. Nothing in this
-  repo enables frame scaling, so the scaled branch is gated at kernel and seam
-  level (against `av2_highbd_convolve_2d_scale_c()`) but not by a bitstream.
+  seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
+  scaled and >8-tap encoder-side filters still run on the CPU.
+- Scaled references: the kernel now models `av2_highbd_convolve_2d_scale_c()`
+  (per-pixel 1/1024 phase) and is gated by 12 cases, and
+  `avm_gpu_inter_convolve_scaled_sr()` is available, but the **seam is not
+  wired for it yet**. The attempt is reverted because a direct reproduction of
+  the seam's window arithmetic (same block through `avm_gpu_hook_inter()` and
+  through the C) was intermittently wrong - i.e. the upload window is a row/col
+  short for some geometries and the result depends on stale buffer contents.
+  That hazard must be understood before the scaled branch goes live; the
+  unscaled encoder gate does not catch it because the border happens to hold
+  the right pixels there.
 - Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
   which serves both the encoder and the decoder) and the seam is gated, but no
   end-to-end stream gate exists yet: with the settings in this repo the encoder
