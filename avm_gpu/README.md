@@ -134,8 +134,10 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_ccso_test.c` | parity gate against `ccso_filter_block_hbd_wo_buf_c()` |
 | `test/avm_gpu_pcwiener_test.c` | end-to-end gate against `apply_pc_wiener_highbd()`: class ids, then the restored plane |
 | `test/avm_gpu_pcwiener_filter_test.c` | filter stage alone against `av2_convolve_symmetric_highbd_c()`, AVM's own filter banks and tap config |
+| `test/avm_gpu_lr_hook_test.c` | seam gate: procunit-sized stripes (64/32/partial) against `apply_pc_wiener_highbd()` |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
+| `vulkan_hook_lr.{h,c}` | loop-restoration seam: `avm_gpu_hook_pcwiener()` runs one procunit through the classifier + filter kernels, with the lossless per-block copy mask |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
@@ -356,6 +358,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] PC-Wiener classification stage + end-to-end gate (class ids and the
       restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
       tx-skip on/off)
+- [x] loop-restoration call site: `pc_wiener_stripe_highbd()` runs the kernels
+      when `AV2_GPU_LR=1`, gated by `avm_gpu_lr_hook_test` (6 procunit shapes x
+      2 bitdepths x tx-skip on/off)
 - [x] encoder call sites (batched SAD and variance) with a byte-identical
       bitstream gate
 - [x] source-block residency per search and one-step search lookahead
@@ -372,12 +377,14 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
-- Kernel families still missing: the forward DCT only covers 4x4/8x8. Loop
-  restoration is now complete as kernels (classification + filtering, gated
-  end to end), but it is not wired into the decoder/encoder: the classifier
-  needs the qval/tskip LUT built host-side (`fill_qval_given_tskip_lut` is
-  static, so the seam has to expose it) before `pc_wiener_stripe_highbd()` can
-  call the GPU pair.
+- Kernel families still missing: the forward DCT only covers 4x4/8x8.
+- Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
+  which serves both the encoder and the decoder) and the seam is gated, but no
+  end-to-end stream gate exists yet: with the settings in this repo the encoder
+  exercises the path (24 procunits for the gate clip) yet the chosen
+  restoration type does not change the bitstream, and the streams we produce do
+  not signal `RESTORE_PC_WIENER` units to the decoder. An end-to-end LR gate
+  needs a stream whose RD actually picks PC-Wiener units.
 - The encoder uses the **single-candidate** path. Replacing a search loop with
   one batched dispatch per step (and keeping frames resident) is what can turn
   this into a speed win; the current 236x slowdown is per-call overhead, not

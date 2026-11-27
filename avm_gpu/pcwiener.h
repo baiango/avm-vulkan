@@ -48,6 +48,8 @@ typedef struct avm_gpu_pcwiener_params {
   int prec_bits;       /* filter_config->prec_bits */
   int num_taps;        /* taps per filter (NUM_PC_WIENER_TAPS_LUMA) */
   const int (*config)[3]; /* NonsepFilterConfig::config, num_pixels entries */
+  /* Optional per-block copy mask (lossless segments), class-id geometry. */
+  const uint8_t *skip_block;
 } avm_gpu_pcwiener_params;
 
 int avm_gpu_pcwiener_create(avm_gpu_ctx *ctx, avm_gpu_pcwiener **out,

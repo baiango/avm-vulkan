@@ -22,6 +22,10 @@
 #include "av2/common/bru.h"
 #include "av2/common/resize.h"
 #include "av2/common/restoration.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_lr.h"
+#endif
 #include "avm_dsp/avm_dsp_common.h"
 #include "avm_mem/avm_mem.h"
 
@@ -1219,6 +1223,54 @@ static void pc_wiener_stripe_highbd(const RestorationUnitInfo *rui,
       return;
     }
     MB_MODE_INFO **mbmi_ptr_procunit = rui->mbmi_ptr + mi_offset_x;
+
+#if defined(AVM_GPU_HOOKS)
+    // Optional Vulkan path (avm_gpu/): the classification and filtering of
+    // this procunit on the GPU kernels. Returns 0 and falls through to the C
+    // function unless AV2_GPU_LR=1 and a compute device is available.
+    {
+      const int is_uv = rui->plane != AVM_PLANE_Y;
+      const int cell_stride = (w + 3) / 4;
+      const int cell_rows = (stripe_height + 3) / 4;
+      uint8_t *mask = calloc((size_t)cell_stride * cell_rows, 1);
+      if (mask) {
+        if (rui->cm->features.has_lossless_segment && rui->lossless_segment) {
+          for (int by = 0; by < cell_rows; by++) {
+            for (int bx = 0; bx < cell_stride; bx++) {
+              const int start_mi_x = (bx * 4) >> (MI_SIZE_LOG2 - rui->ss_x);
+              const int start_mi_y = (by * 4) >> (MI_SIZE_LOG2 - rui->ss_y);
+              MB_MODE_INFO **this_mbmi_ptr = mbmi_ptr_procunit +
+                                             start_mi_y * rui->mi_stride +
+                                             start_mi_x;
+              MB_MODE_INFO **this_mbmi = get_mi_location_from_collocated_mi(
+                  rui->cm, this_mbmi_ptr, is_uv);
+              mask[by * cell_stride + bx] =
+                  rui->lossless_segment[this_mbmi[0]->segment_id] ? 1 : 0;
+            }
+          }
+        }
+        // The classifier's normalisers are set by apply_pc_wiener_highbd();
+        // set them here too, from the same tables, so the GPU sees them.
+        set_feature_normalizers(rui->pcwiener_buffers);
+        const int done = avm_gpu_hook_pcwiener(
+            src + j, w, stripe_height, src_stride, dst + j, dst_stride,
+            rui->tskip + (j >> MI_SIZE_LOG2), rui->tskip_stride,
+            rui->wiener_class_id + (j >> MI_SIZE_LOG2),
+            rui->wiener_class_id_stride, bit_depth, classify_only,
+            pcwiener_filters_luma, filter_selector,
+            &rui->pcwiener_buffers->qval_given_tskip_lut[0][0],
+            rui->pcwiener_buffers->feature_normalizers, pc_wiener_thresholds,
+            pc_wiener_lut_to_class_index, PC_WIENER_PREC_FEATURE,
+            pc_wiener_threshold_shift, rui->tskip_zero_flag, mask, cell_stride,
+            NUM_PC_WIENER_TAPS_LUMA, pcwiener_tap_config_luma,
+            (int)(sizeof(pcwiener_tap_config_luma) /
+                  sizeof(pcwiener_tap_config_luma[0])),
+            PC_WIENER_PREC_FILTER);
+        free(mask);
+        if (done) continue;
+      }
+    }
+#endif
 
     // The function update_accumulator() is used to compute the accumulated
     // result of tx_skip and feature direction filtering output at

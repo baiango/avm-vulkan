@@ -197,7 +197,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_ccso.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/pcwiener.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_var.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_var.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_lr.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
@@ -293,6 +294,13 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_pcwiener_test PRIVATE avm)
   add_test(NAME avm_gpu_pcwiener_test COMMAND avm_gpu_pcwiener_test)
   set_tests_properties(avm_gpu_pcwiener_test PROPERTIES SKIP_RETURN_CODE 77)
+
+  # The loop-restoration seam as pc_wiener_stripe_highbd() calls it.
+  add_executable(avm_gpu_lr_hook_test
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_lr_hook_test.c")
+  target_link_libraries(avm_gpu_lr_hook_test PRIVATE avm)
+  add_test(NAME avm_gpu_lr_hook_test COMMAND avm_gpu_lr_hook_test)
+  set_tests_properties(avm_gpu_lr_hook_test PROPERTIES SKIP_RETURN_CODE 77)
 
   # The filter stage on its own: all four filter sets, two geometries.
   add_executable(avm_gpu_pcwiener_filter_test

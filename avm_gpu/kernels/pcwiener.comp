@@ -21,6 +21,7 @@ layout(std430, binding = 2) readonly buffer Sel { uint sel[]; };
 layout(std430, binding = 3) readonly buffer Flt { int flt[]; };
 layout(std430, binding = 4) readonly buffer Geo { ivec2 geo[]; };
 layout(std430, binding = 5) buffer Dst { uint outimg[]; };
+layout(std430, binding = 6) readonly buffer Skip { uint skip[]; };
 
 layout(push_constant) uniform PC {
   uint width;       // visible width
@@ -36,6 +37,7 @@ layout(push_constant) uniform PC {
   uint prec_bits;
   uint num_taps;    // taps per filter
   uint count;       // width * height
+  uint use_skip;    // 1 = honour the per-block copy mask
 } pc;
 
 void main() {
@@ -49,7 +51,8 @@ void main() {
   // PC_WIENER_BLOCK_SIZE == 4, offsets 0: the filter is chosen per 4x4 block.
   const int br = (r >> 2) << 2;
   const int bc = (c >> 2) << 2;
-  const uint cls = cid[uint(br >> 2) * pc.cid_stride + uint(bc >> 2)];
+  const uint cell = uint(br >> 2) * pc.cid_stride + uint(bc >> 2);
+  const uint cls = cid[cell];
   const int base = int(sel[cls] * pc.num_taps);
 
   const int origin = int(pc.lead_rows) * int(pc.stride) + int(pc.lead_cols);
@@ -73,5 +76,9 @@ void main() {
   const int v = acc < 0 ? -((-acc + rnd) >> prec) : ((acc + rnd) >> prec);
   const int maxv = (1 << int(pc.bd)) - 1;
   const int clipped = v < 0 ? 0 : (v > maxv ? maxv : v);
-  outimg[uint(origin + r * int(pc.dst_stride) + c)] = uint(clipped);
+  // Lossless segments are not filtered: apply_pc_wiener_highbd() copies the
+  // block through instead, and the caller marks those blocks in the mask.
+  const bool copy_block = pc.use_skip != 0u && skip[cell] != 0u;
+  outimg[uint(origin + r * int(pc.dst_stride) + c)] =
+      copy_block ? img[uint(idx)] : uint(clipped);
 }

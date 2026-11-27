@@ -29,8 +29,8 @@
 
 struct avm_gpu_pcwiener {
   avm_gpu_pipeline *pipe;
-  avm_gpu_buf img, cid, sel, flt, geo, dst;
-  VkDeviceSize img_cap, cid_cap, sel_cap, flt_cap, geo_cap, dst_cap;
+  avm_gpu_buf img, cid, sel, flt, geo, dst, skip;
+  VkDeviceSize img_cap, cid_cap, sel_cap, flt_cap, geo_cap, dst_cap, skip_cap;
   /* Classification stage. */
   avm_gpu_pipeline *cls_pipe;
   avm_gpu_buf c_img, c_tsk, c_lut, c_norm, c_thr, c_lutcls, c_out;
@@ -42,6 +42,7 @@ typedef struct push_constants {
   uint32_t width, height, stride, dst_stride, lead_rows, lead_cols;
   uint32_t bd, cid_stride, num_sym, singleton_index, prec_bits, num_taps;
   uint32_t count;
+  uint32_t use_skip;
 } push_constants;
 
 typedef struct tap_geo {
@@ -71,7 +72,7 @@ int avm_gpu_pcwiener_create(avm_gpu_ctx *ctx, avm_gpu_pcwiener **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_PCWIENER_SPV_PATH,
-                              "AVM_GPU_PCWIENER_SPV", 6, sizeof(push_constants),
+                              "AVM_GPU_PCWIENER_SPV", 7, sizeof(push_constants),
                               &pc->pipe, err) != 0) {
     free(pc);
     return -1;
@@ -96,6 +97,7 @@ void avm_gpu_pcwiener_destroy(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc) {
   avm_gpu_buf_destroy(ctx, &pc->flt);
   avm_gpu_buf_destroy(ctx, &pc->geo);
   avm_gpu_buf_destroy(ctx, &pc->dst);
+  avm_gpu_buf_destroy(ctx, &pc->skip);
   avm_gpu_pipeline_destroy(ctx, pc->cls_pipe);
   avm_gpu_buf_destroy(ctx, &pc->c_img);
   avm_gpu_buf_destroy(ctx, &pc->c_tsk);
@@ -147,7 +149,8 @@ int avm_gpu_pcwiener_filter(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc,
       ensure_buf(ctx, &pc->sel, &pc->sel_cap, 256 * 4, err) ||
       ensure_buf(ctx, &pc->flt, &pc->flt_cap, filter_words * 4, err) ||
       ensure_buf(ctx, &pc->geo, &pc->geo_cap, sizeof(geo), err) ||
-      ensure_buf(ctx, &pc->dst, &pc->dst_cap, img_n * 4, err)) {
+      ensure_buf(ctx, &pc->dst, &pc->dst_cap, img_n * 4, err) ||
+      ensure_buf(ctx, &pc->skip, &pc->skip_cap, (size_t)cid_n * 4, err)) {
     return -1;
   }
 
@@ -168,14 +171,18 @@ int avm_gpu_pcwiener_filter(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc,
     }
   }
   memcpy(pc->geo.mapped, geo, sizeof(geo));
+  uint32_t *skip = pc->skip.mapped;
+  for (size_t i = 0; i < cid_n; i++) {
+    skip[i] = params->skip_block ? params->skip_block[i] : 0u;
+  }
 
   const uint16_t *dst_plane = dst - (size_t)params->lead_rows * params->dst_stride -
                               params->lead_cols;
   uint32_t *d32 = pc->dst.mapped;
   for (size_t i = 0; i < img_n; i++) d32[i] = dst_plane[i];
 
-  const avm_gpu_buf bufs[6] = { pc->img, pc->cid, pc->sel,
-                                pc->flt, pc->geo, pc->dst };
+  const avm_gpu_buf bufs[7] = { pc->img, pc->cid,  pc->sel, pc->flt,
+                                pc->geo, pc->dst,  pc->skip };
   push_constants p = { (uint32_t)w,
                        (uint32_t)h,
                        (uint32_t)params->stride,
@@ -188,10 +195,11 @@ int avm_gpu_pcwiener_filter(avm_gpu_ctx *ctx, avm_gpu_pcwiener *pc,
                        (uint32_t)params->singleton_index,
                        (uint32_t)params->prec_bits,
                        (uint32_t)params->num_taps,
-                       (uint32_t)(w * h) };
+                       (uint32_t)(w * h),
+                       params->skip_block ? 1u : 0u };
   const uint32_t groups =
       (uint32_t)((w * h + PCWIENER_WORKGROUP - 1) / PCWIENER_WORKGROUP);
-  const int rc = avm_gpu_pipeline_dispatch(ctx, pc->pipe, bufs, 6, &p,
+  const int rc = avm_gpu_pipeline_dispatch(ctx, pc->pipe, bufs, 7, &p,
                                            sizeof(p), groups, err);
   if (rc != 0) return rc;
 
