@@ -110,7 +110,8 @@ if ! "$AVMENC" $INTER_ARGS -o "$work/motion_cpu.ivf" "$work/motion.y4m" \
   tail -20 "$work/motion_cpu.log"
   exit 1
 fi
-if ! AV2_GPU_INTER=1 AV2_GPU_FWD_TXFM=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $INTER_ARGS \
+if ! AV2_GPU_INTER=1 AV2_GPU_FWD_TXFM=1 AV2_GPU_ITXFM=1 \
+    AV2_GPU_INTER_STATS=1 AV2_GPU_ITXFM_STATS=1 "$AVMENC" $INTER_ARGS \
     -o "$work/motion_gpu.ivf" "$work/motion.y4m" >"$work/inter.log" 2>&1; then
   if grep -q "no Vulkan device\|vkCreateInstance" "$work/inter.log"; then
     echo "SKIP: no Vulkan device"
@@ -130,6 +131,7 @@ wcalls=$(sed -n 's/.*blends, \([0-9][0-9]*\) warped,.*/\1/p' "$work/inter.log")
 fcalls=$(sed -n 's/.* \([0-9][0-9]*\) forward transforms.*/\1/p' "$work/inter.log")
 cwcalls=$(sed -n 's/.* \([0-9][0-9]*\) compound warped,.*/\1/p' "$work/inter.log")
 wcpu=$(sed -n 's/.* \([0-9][0-9]*\) warped C).*/\1/p' "$work/inter.log")
+icalls2=$(sed -n 's/.* \([0-9][0-9]*\) inverse transforms on the GPU.*/\1/p' "$work/inter.log")
 dcalls=$(sed -n 's/.* \([0-9][0-9]*\) masked compound.*/\1/p' "$work/inter.log")
 if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
   echo "FAIL: the GPU inter path predicted no blocks"
@@ -148,6 +150,11 @@ if [ -z "$fcalls" ] || [ "$fcalls" -le 0 ]; then
 fi
 if [ -z "$cwcalls" ] || [ "$cwcalls" -le 0 ]; then
   echo "FAIL: no compound warped block ran on the GPU"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if [ -z "$icalls2" ] || [ "$icalls2" -le 0 ]; then
+  echo "FAIL: no inverse transform ran on the GPU"
   tail -20 "$work/inter.log"
   exit 1
 fi
@@ -300,7 +307,7 @@ echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
 inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
 inter_hash=$(hash_of "$work/motion_gpu.ivf")
-echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped ($cwcalls compound, 0 left to the C), $fcalls forward transforms, $dcalls masked compound)"
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks, $wcalls warped ($cwcalls compound, 0 left to the C), $fcalls forward transforms, $icalls2 inverse transforms, $dcalls masked compound)"
 
 mask_cpu_hash=$(hash_of "$work/mask_cpu.ivf")
 mask_hash=$(hash_of "$work/mask_gpu.ivf")

@@ -141,6 +141,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
 | `vulkan_hook_inter.{h,c}` | inter prediction seam: subpel prediction (scaled and unscaled, compound included), the masked blend, the d16 masked compound and affine prediction, `avm_gpu_hook_inter()` / `avm_gpu_hook_blend_a64()` / `avm_gpu_hook_blend_a64_d16()` / `avm_gpu_hook_warp()` |
+| `vulkan_hook_itxfm.{h,c}` | inverse transform seam: `avm_gpu_hook_itxfm()`, the type -> kernel mapping (IDTX as a scaled identity, FDDT as the reversed DDTX matrix) and the stats line |
 | `vulkan_hook_lr.{h,c}` | loop-restoration seam: `avm_gpu_hook_pcwiener()` runs one procunit through the classifier + filter kernels, with the lossless per-block copy mask |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
@@ -379,6 +380,13 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] compound over a scaled reference: 1/1024 per-pixel phase in the kernel,
       gated against `av2_highbd_convolve_2d_scale_c()` (2 bitdepths x even/uneven
       x 3 scales), and taken by the seam
+- [x] inverse transform call site: `av2_highbd_inv_txfm_add_master()` runs the
+      inverse kernel when `AV2_GPU_ITXFM=1` - every primary type (DCT2, IDT,
+      DST7, DCT8, DDTX, FDDT) at every size up to 64x64, with the DDT
+      substitution resolved exactly as the reference does (97,726 / 200,239 /
+      367,124 blocks at cpu-used 8 / 4 / 2 in the gate, 0 left to the C,
+      bitstream unchanged). The seam sits above the RTCD dispatch, which would
+      otherwise hand the block to a SIMD C kernel.
 - [x] forward transform call site: `av2_fwd_txfm()` runs the forward kernel
       when `AV2_GPU_FWD_TXFM=1`, every primary type and size up to 64x64
       (109,325 transforms in the gate, was 35,028 with DCT_DCT only, bitstream

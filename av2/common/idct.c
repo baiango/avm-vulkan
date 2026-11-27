@@ -20,6 +20,10 @@
 #include "av2/common/blockd.h"
 #include "av2/common/enums.h"
 #include "av2/common/idct.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_itxfm.h"
+#endif
 #include "av2/common/scan.h"
 #include "av2/common/txb_common.h"
 
@@ -994,6 +998,39 @@ static void av2_highbd_inv_txfm_add_master(const tran_low_t *input,
       return;
     }
   }
+#if defined(AVM_GPU_HOOKS)
+  // Optional Vulkan path (avm_gpu/): the 1D inverse kernels on the GPU, for
+  // every type and size the reference has a kernel for. The RTCD dispatch
+  // below would otherwise hand the block to a SIMD C kernel, so the seam sits
+  // here, at the point both the encoder and the decoder call. Returns 0 and
+  // falls through to the C transform otherwise.
+  {
+    const TX_SIZE tx_size = txfm_param->tx_size;
+    const int width = AVMMIN(MAX_TX_SIZE >> 1, tx_size_wide[tx_size]);
+    const int height = AVMMIN(MAX_TX_SIZE >> 1, tx_size_high[tx_size]);
+    int row_type = g_hor_tx_type[txfm_param->primary_tx_type];
+    int col_type = g_ver_tx_type[txfm_param->primary_tx_type];
+    if (txfm_param->use_ddt) {
+      const int ddt_row = (width == 4 && REPLACE_ADST4) ||
+                          (width == 8 && REPLACE_ADST8) ||
+                          (width == 16 && REPLACE_ADST16);
+      if (ddt_row && (row_type == DST7 || row_type == DCT8)) {
+        row_type = (row_type == DST7) ? DDTX : FDDT;
+      }
+      const int ddt_col = (height == 4 && REPLACE_ADST4) ||
+                          (height == 8 && REPLACE_ADST8) ||
+                          (height == 16 && REPLACE_ADST16);
+      if (ddt_col && (col_type == DST7 || col_type == DCT8)) {
+        col_type = (col_type == DST7) ? DDTX : FDDT;
+      }
+    }
+    if (avm_gpu_hook_itxfm(input, dest, stride, tx_size_wide[tx_size],
+                           tx_size_high[tx_size], txfm_param->bd, row_type,
+                           col_type)) {
+      return;
+    }
+  }
+#endif
   av2_highbd_inv_txfm_add(input, dest, stride, txfm_param);
 }
 
