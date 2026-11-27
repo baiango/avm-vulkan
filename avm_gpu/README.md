@@ -23,10 +23,10 @@ and throughput is not claimed — this milestone is about correctness.
   through the batched hook in motion search (one dispatch per 4-candidate
   group) and produces a bitstream identical to the CPU run (gate:
   `test/run_encoder_parity.sh`, 713k blocks, md5 compared).
-- `avm_gpu_txfm_*` reproduces `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c`
-  bit-for-bit, including the 64-bit `tran_high_t` products, which are formed
-  with `imulExtended` because MoltenVK reports `shaderInt64 = 0` (gate:
-  `test/avm_gpu_txfm_test.c`, 4x4 and 8x8, 12-bit and small residual ranges).
+- `avm_gpu_txfm_fwd()` reproduces `fwd_txfm_c()` bit-for-bit for every primary
+  transform type and size the encoder uses, with the 64-bit products formed by
+  `imulExtended` because MoltenVK reports `shaderInt64 = 0` (gate:
+  `test/avm_gpu_txfm_test.c`).
 - `avm_gpu_intra_*` matches `avm_highbd_{dc,v,h,dc_left,dc_top,dc_128}_predictor_*_c`
   for 4x4…64x64 (gate: `test/avm_gpu_intra_test.c`), and carries AVM's block
   availability rule (no neighbours -> DC_128, one side -> DC_LEFT/DC_TOP) plus
@@ -106,7 +106,6 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
 | `pcwiener.{h,c}` | PC-Wiener restoration, both stages: `avm_gpu_pcwiener_classify()` and `avm_gpu_pcwiener_filter()`, host-derived tap geometry |
-| `kernels/txfm.comp` | DCT butterflies with 64-bit products emulated via `imulExtended` |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
 | `kernels/intra_dir.comp` | directional zones 1-3, one invocation per pixel, with the edge guard window |
 | `kernels/itxfm.comp` | inverse DCT for 4/8/16/32 driven by AVM's inverse kernel matrix, plus the 2x replicate of the 64-wide/tall sizes |
@@ -119,7 +118,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/deblock.comp` | `filt_choice` + `filt_generic_asym`, one invocation per 4-sample call |
 | `kernels/cdef.comp` | CDEF `constrain` + pri/sec taps, one invocation per pixel |
 | `kernels/ccso.comp` | `cal_filter_support` + band/class LUT lookup, one invocation per sample |
-| `kernels/fwd_txfm.comp` | forward DCT2 with the reference's folded butterflies, every size up to 64 (64-length axes box-downsampled first) |
+| `kernels/fwd_txfm.comp` | forward transform, every primary type and size up to 64: DCT2 folded butterflies, the identity scaling and the DST7/DCT8/DDTX/FDDT matrices (64-length axes box-downsampled first) |
 | `kernels/cwpconv.comp` | compound prediction, the CWP family: all four shapes (`2d`, `x`, `y`, `copy`) of `av2_highbd_cwp_convolve_*_c()` over the high-precision buffer |
 | `kernels/pcwiener.comp` | PC-Wiener loop restoration: the symmetric 25-tap non-separable filter per 4x4 class block, one invocation per pixel |
 | `kernels/pcwcls.comp` | PC-Wiener classification: 6x6 directional-feature and tx-skip box sums, qval/tskip LUT, thresholds and class LUT, one invocation per 4x4 block |
@@ -127,7 +126,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `kernels/variance.comp` | same shape; carries 64-bit SSE as an (hi, lo) u32 pair |
 | `test/avm_gpu_sad_test.c` | parity gate against `avm_highbd_sad*_c` (exit 77 = no device) |
 | `test/avm_gpu_var_test.c` | parity gate against `avm_highbd_{8,10,12}_variance*_c` |
-| `test/avm_gpu_txfm_test.c` | parity gate against `avm_fdct4x4_c` / `avm_highbd_fdct8x8_c` |
+| `test/avm_gpu_txfm_test.c` | parity gate against `fwd_txfm_c()` (every type, size and DDT setting) |
 | `test/avm_gpu_intra_test.c` | parity gate against the `avm_highbd_*_predictor_*` set, plus rule/edge checks |
 | `test/avm_gpu_itxfm_test.c` | parity gate against `inv_txfm_c()` |
 | `test/avm_gpu_inter_test.c` | parity gate against `avm_highbd_convolve8_c()` and the A64 blend |
@@ -153,11 +152,10 @@ and throughput is not claimed — this milestone is about correctness.
 - **Two layouts, one kernel.** With `AVM_GPU_PACK16=1` planes are uploaded as
   **two little-endian 16-bit samples per 32-bit word** (M1): the host `memcpy`s
   the plane straight into the SSBO and the shader unpacks. Without it the M0
-  layout (one sample per word) is used. SAD, variance/SSE and the forward DCT
-  all support it; `avm_gpu_var_test_packed` and `avm_gpu_txfm_test_packed`
-  gate the packed path in ctest, and the encoder parity gate passes with
-  `AVM_GPU_PACK16=1` exported. Packed mode requires even strides; odd strides
-  fall back to the M0 layout.
+  layout (one sample per word) is used. SAD and variance/SSE switch on the flag;
+  the inter seam (inter/CWP/warp) uses the packed layout unconditionally when
+  the row stride is even. `avm_gpu_var_test_packed` gates the flag in ctest and
+  the encoder parity gate passes with `AVM_GPU_PACK16=1` exported.
 - **Two placements.** By default buffers are host-visible and coherent: planes
   are uploaded by `memcpy` and results read back after the fence. With
   `AV2_GPU_ARENA=1` the SAD and variance modules instead suballocate their
@@ -253,7 +251,7 @@ Buffer placement used by both seams:
 | unset | host-visible, coherent per-call buffers |
 | `AV2_GPU_ARENA=1` | device-local arena + staging copies (`AV2_GPU_ARENA_MB`, default 64) |
 | `AV2_GPU_ARENA_VERBOSE=1` | report arena size and any slot fallback |
-| `AVM_GPU_PACK16=1` | packed 16-bit upload layout (SAD, variance, forward DCT) |
+| `AVM_GPU_PACK16=1` | packed 16-bit upload layout for SAD and variance (the inter seam always packs when the stride is even) |
 
 ### End-to-end gate
 
@@ -381,9 +379,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] compound over a scaled reference: 1/1024 per-pixel phase in the kernel,
       gated against `av2_highbd_convolve_2d_scale_c()` (2 bitdepths x even/uneven
       x 3 scales), and taken by the seam
-- [x] forward transform call site: `av2_fwd_txfm()` runs the forward DCT2 kernel
-      when `AV2_GPU_FWD_TXFM=1`, every size up to 64x64 (35,028 transforms in
-      the gate, bitstream unchanged)
+- [x] forward transform call site: `av2_fwd_txfm()` runs the forward kernel
+      when `AV2_GPU_FWD_TXFM=1`, every primary type and size up to 64x64
+      (109,325 transforms in the gate, was 35,028 with DCT_DCT only, bitstream
+      unchanged)
 - [x] warped (affine) prediction call site: `av2_make_inter_predictor()`'s
       WARP_PRED branch runs the affine or extended-range kernel when
       `AV2_GPU_INTER=1` (4,701 warped blocks in the gate at cpu-used 8, 77,403 at
@@ -426,8 +425,13 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   two matrices x three sizes x plain/weighted). The encoder streams keep their
   md5 with 312 / 3,244 compound warps on the GPU, but no gate stream's final
   bitstream depends on a compound-warp prediction - they all lose the RD
-  decision - so the stream-level proof there is "unchanged md5 with a non-zero
-  count", not "the result is used".
+  decision. Tried, each time with a kernel control that changes every compound
+  warp's output (the round offset dropped): the half-pel clip at cpu-used 8 and
+  2, the 16:9 resized clip at cpu-used 8 and 2, the key-frame-resized clip at
+  cpu-used 6, and the noisy clip - every md5 stayed identical. So the
+  stream-level evidence here is "non-zero GPU count with the CPU md5"; the
+  correctness proof is the kernel gate, which does fail (64-255 samples per
+  case) when the compound maths is broken.
 - Every warp path is on the GPU: the extended-range kernel now takes the warp
   boundary box (the encoder always sets one on that path) and clamps its
   reference reads to the per-8x8 limits, so the seam declines no warp at all -
@@ -441,8 +445,11 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   stride keeps the one-sample-per-word layout). Outputs (pixels, the compound
   buffer) stay one sample per word, since two invocations can share a word.
   Measured: a 3,520-sample window uploads as 7,040 bytes instead of 14,080.
-  The inverse transform, intra and the filters still widen to 32-bit words. A
-  device-local arena exists for SAD and variance, but the remaining modules use
+  Not packed, on purpose: intra reads only the neighbour row/column (a few
+  hundred bytes per call), the inverse transform reads 32-bit coefficients
+  (packing them would truncate), and deblock/CDEF/CCSO are gate-only modules
+  whose seams are not wired into an encode, so packing them would change no
+  stream. A device-local arena exists for SAD and variance, but the rest use
   host-visible buffers and re-upload per call.
 - Scaled compound is live. The SIGBUS that blocked it was a reproducer bug -
   it passed `scaled=0` together with a 1/1024 step (910), so the seam's window
@@ -492,10 +499,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   forward transforms on the GPU in the inter gate (was 35,028 with DCT_DCT
   only), bitstream unchanged. The only thing left on the CPU is a 32-length
   DST7/DCT8, which the reference asserts against, so the encoder never asks.
-  The 4x4/8x8 `avm_highbd_fdct*` hooks remain dead code because nothing in this
-  tree calls those functions. The inter
-  seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
-  scaled and >8-tap encoder-side filters still run on the CPU.
+  The old 4x4/8x8 `avm_highbd_fdct*` path was dead code (nothing in this tree
+  calls those functions) and has been removed together with its shader, host
+  entry point and the `avm_gpu_txfm_test_packed` ctest case.
 - The inter seam's upload window is `last_base_y + 7` rows, which is the exact
   minimum the entry point enforces (`sy + last_base + 4 <= rows`, `sy == 3`),
   not slack. Measured: `last_base_y + 7` agrees over 800 comparisons, one row

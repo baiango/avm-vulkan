@@ -204,7 +204,6 @@ documentation. This section is the short version.
 | high-bitdepth SAD (`sad.comp`) | matches `avm_highbd_sadWxH_c`, 9 block sizes 4×4…64×64, host-visible and device-local arena placement | `avm_gpu_sad_test`, `avm_gpu_sad_test_arena` |
 | variance / SSE (`variance.comp`) | matches `avm_highbd_{8,10,12}_varianceWxH_c`, 9 block sizes × 3 bitdepths, both upload layouts and both buffer placements | `avm_gpu_var_test`, `avm_gpu_var_test_packed`, `avm_gpu_var_test_arena` |
 | variance seam (memo + block-area threshold) | the encoder's `highbd_variance64()` seam returns the reference `(sse, sum)` for every block size, memo hits included | `avm_gpu_var_hook_test` |
-| forward DCT 4x4 / 8x8 (`txfm.comp`) | matches `avm_fdct4x4_c` and `avm_highbd_fdct8x8_c` bit-for-bit, both upload layouts | `avm_gpu_txfm_test`, `avm_gpu_txfm_test_packed` |
 | intra DC/V/H/DC_LEFT/DC_TOP/DC_128/SMOOTH/SMOOTH_V/SMOOTH_H/PAETH (`intra.comp`) | matches `avm_highbd_*_predictor_*_c`, 10 modes × 4x4…64x64, plus availability rule and clamped edges | `avm_gpu_intra_test` |
 | directional intra zones 1-3 (`intra_dir.comp`) | matches `av2_highbd_dr_prediction_z{1,2,3}_c`, 6 angle configs × 5 sizes × mrl 0-2 | `avm_gpu_intra_test` |
 | inverse DCT + ADST + IDTX + FLIPADST + DDT, 4…64 (`itxfm.comp`) | matches `inv_txfm_c()` for DCT on 16 sizes, all 9 64-wide/tall sizes (32-sample 1D pass + 2× replicate) and ADST/IDTX/FLIPADST/DDT type and size combinations, 100 cases | `avm_gpu_itxfm_test` |
