@@ -100,10 +100,9 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
    * x-only CWP paths are kernel-gated against the C (avm_gpu_inter_test) but
    * change the encoder bitstream when the seam takes them, so they stay on the
    * CPU until that difference is understood; y-only and 2D are verified. */
-  if (is_compound) {
-    const int copy_or_x_only = subpel_y_qn == 0;
-    if (copy_or_x_only) return 0;
-  }
+  /* All four CWP shapes are taken: the facade's dispatch (copy / x-only /
+   * y-only / 2D) is exactly the mode the kernel selects from the phases. */
+
 
   pthread_mutex_lock(&g_lock);
   int handled = 0;

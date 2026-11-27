@@ -93,8 +93,13 @@ void main() {
     res = round_pow2(vsum, r1) & 0xffff;  // CONV_BUF_TYPE is uint16_t
   }
   const uint idx = uint(y) * pc.dst_stride + uint(x);
-  conv[y * int(pc.conv_stride) + x] = uint(res);
-  if (pc.conv_index == 0u && pc.do_average == 0u) return;
+  /* Only the first pass writes the high-precision buffer; the second reads it.
+   * (Writing it on the second pass would leak predictor 2 into whatever the
+   * caller does with that buffer next - the C keeps predictor 1 there.) */
+  if (pc.do_average == 0u) {
+    conv[y * int(pc.conv_stride) + x] = uint(res);
+  }
+  if (pc.do_average == 0u && pc.conv_index == 0u) return;
 
   int tmp;
   if (pc.do_average == 0u) {

@@ -362,9 +362,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] PC-Wiener classification stage + end-to-end gate (class ids and the
       restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
       tx-skip on/off)
-- [x] compound inter kernel for all four CWP shapes + parity gate (2 bitdepths x
-      even/uneven weights x 6 subpel positions, phase-dispatched reference) and,
-      in the seam, the y-only and 2D shapes
+- [x] compound inter, all four CWP shapes: kernel + parity gate (2 bitdepths x
+      even/uneven weights x 6 subpel positions, phase-dispatched reference) and
+      the seam takes every shape (50,160 compound blocks in the gate, bitstream
+      unchanged)
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
       kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
       8-tap), with the encoder bitstream gate on a half-pel motion clip
@@ -396,15 +397,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   less makes the seam decline every case. The seam test treats a decline as a
   failure - an earlier revision of it counted declines as passes, which is why
   an under-sized window looked clean.
-- **Compound prediction** has a kernel for all four CWP shapes, gated against
-  the C (the reference dispatches by phase, as the facade does). In the seam
-  only the **y-only and 2D** shapes are taken: those keep the encoder bitstream
-  identical (70,095 inter blocks of which 4,130 compound). The `copy` and
-  `x-only` shapes pass their kernel gate but change the bitstream when the seam
-  takes them (bisected with a mode mask: copy alone gives a different md5), so
-  they stay on the CPU until that difference is understood - most likely the
-  seam's mapping of a zero-phase axis to the facade's `need_x`/`need_y`, not
-  the kernel arithmetic, since each kernel path matches the C directly.
+- **Compound prediction** covers all four CWP shapes in the kernel and in the
+  seam; the facade's dispatch (copy / x-only / y-only / 2D, from `need_x` and
+  `need_y`) is exactly what the kernel selects from the phases, confirmed by
+  logging the facade for a run (`cmp=1 avg=0 sp=(0,0) need=(0,0)` and
+  `sp=(8,0) need=(1,0)`). The bug that made the copy/x-only shapes look wrong was
+  not the mapping: the kernel wrote the high-precision buffer on *both* passes,
+  while the C only writes it on the first, so predictor 2 leaked into whatever
+  the caller did with that buffer next. With the write restricted to the first
+  pass the seam takes every shape and the bitstream is unchanged (116,180 inter
+  blocks, 50,160 of them compound).
 - **Compound prediction is not a seam extension.** AVM 1.0 does not produce two
   sr predictors and blend them: with `conv_params->is_compound`,
   `av2_highbd_convolve_2d_facade()` dispatches to the CWP family
