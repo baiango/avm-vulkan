@@ -134,7 +134,8 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
           g_hook.ctx, g_hook.inter, window, src_stride, rows, HOOK_BORDER,
           HOOK_BORDER, filter_x, filter_y, subpel_x_qn, subpel_y_qn, w, h, bd,
           round_0, round_1, conv_dst, conv_stride, do_average, do_average,
-          uneven, fwd_offset, bck_offset, dst, dst_stride, err);
+          uneven, fwd_offset, bck_offset, scaled, x_step_qn, y_step_qn, dst,
+          dst_stride, err);
     } else {
     rc =
         scaled ? avm_gpu_inter_convolve_scaled_sr(

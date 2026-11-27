@@ -45,9 +45,10 @@ int main(void) {
   }
   InterpFilterParams fp_x = { (const int16_t *)av2_sub_pel_filters_8, 8 };
   InterpFilterParams fp_y = { (const int16_t *)av2_sub_pel_filters_8, 8 };
-  uint16_t cpu_conv[CONV_STRIDE * 8], gpu_conv[CONV_STRIDE * 8];
-  uint16_t cpu_out[CONV_STRIDE * 8], gpu_out[CONV_STRIDE * 8];
-  const int w = 4, h = 4, sx = 8, sy = 8;
+  uint16_t cpu_conv[CONV_STRIDE * 64], gpu_conv[CONV_STRIDE * 64];
+  uint16_t cpu_out[CONV_STRIDE * 64], gpu_out[CONV_STRIDE * 64];
+  const int w = 64, h = 64, sx = 8, sy = 8;
+  const int use_gpu = getenv("CWP_DBG_NOGPU") == NULL;
 
   for (int px = 0; px <= 5; px++) {
     for (int py = 0; py <= 0; py++) {
@@ -59,12 +60,12 @@ int main(void) {
       av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
                                    CONV_STRIDE, w, h, &fp_x, &fp_y, px, py,
                                    &conv, BD);
-      if (avm_gpu_inter_cwp_convolve(
+      if (use_gpu && avm_gpu_inter_cwp_convolve(
               ctx, inter, plane, SRC_W, SRC_H, sx, sy,
               (const int16_t *)av2_sub_pel_filters_8,
               (const int16_t *)av2_sub_pel_filters_8, px, py, w, h, BD,
               conv.round_0, conv.round_1, gpu_conv, CONV_STRIDE, 0, 0, 0, 0, 0,
-              gpu_out, CONV_STRIDE, err) != 0) {
+              0, 16, 16, gpu_out, CONV_STRIDE, err) != 0) {
         printf("kernel: %s\n", err);
         return 1;
       }

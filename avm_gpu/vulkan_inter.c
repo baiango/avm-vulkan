@@ -36,6 +36,7 @@
 typedef struct cwp_constants {
   uint32_t src_stride, conv_stride, dst_stride, w, h, bd, x0, y0, sx, sy;
   uint32_t round0, round1, do_average, uneven, fwd, bck, conv_index, mode;
+  uint32_t sb, x_step, y_step;
 } cwp_constants;
 
 struct avm_gpu_inter {
@@ -401,8 +402,9 @@ int avm_gpu_inter_cwp_convolve(
     int src_rows, int sx, int sy, const int16_t *filter_x,
     const int16_t *filter_y, int subpel_x_qn, int subpel_y_qn, int w, int h,
     int bd, int round0, int round1, uint16_t *conv, int conv_stride,
-    int conv_index, int do_average, int uneven, int fwd, int bck,
-    uint16_t *dst, int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+    int conv_index, int do_average, int uneven, int fwd, int bck, int scaled,
+    int x_step_qn, int y_step_qn, uint16_t *dst, int dst_stride,
+    char err[AVM_GPU_ERR_LEN]) {
   if (!src || !filter_x || !filter_y || !conv || !dst) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
@@ -412,12 +414,20 @@ int avm_gpu_inter_cwp_convolve(
              sy);
     return -1;
   }
-  if (subpel_x_qn < 0 || subpel_x_qn > 15 || subpel_y_qn < 0 ||
-      subpel_y_qn > 15) {
-    snprintf(err, AVM_GPU_ERR_LEN, "subpel position out of range");
+  const int sb = scaled ? 10 : 4;
+  const int smask = (1 << sb) - 1;
+  const int x_step = scaled ? x_step_qn : 16;
+  const int y_step = scaled ? y_step_qn : 16;
+  if (subpel_x_qn < 0 || subpel_x_qn > smask || subpel_y_qn < 0 ||
+      subpel_y_qn > smask || x_step <= 0 || y_step <= 0 ||
+      x_step > (1 << sb) || y_step > (1 << sb)) {
+    snprintf(err, AVM_GPU_ERR_LEN, "subpel position or step out of range");
     return -1;
   }
-  if (sx + w + 4 > src_stride || sy + h + 4 > src_rows) {
+  /* The taps reach last_base + 4 past the block origin on each axis. */
+  const int last_bx = ((w - 1) * x_step + subpel_x_qn) >> sb;
+  const int last_by = ((h - 1) * y_step + subpel_y_qn) >> sb;
+  if (sx + last_bx + 4 > src_stride || sy + last_by + 4 > src_rows) {
     snprintf(err, AVM_GPU_ERR_LEN, "block overlaps the filter border");
     return -1;
   }
@@ -475,8 +485,13 @@ int avm_gpu_inter_cwp_convolve(
                        (uint32_t)fwd,
                        (uint32_t)bck,
                        (uint32_t)conv_index,
-                       (uint32_t)(subpel_x_qn == 0 ? (subpel_y_qn == 0 ? 3 : 2)
-                                                  : (subpel_y_qn == 0 ? 1 : 0)) };
+                       (uint32_t)(scaled ? 0
+                                         : (subpel_x_qn == 0
+                                                ? (subpel_y_qn == 0 ? 3 : 2)
+                                                : (subpel_y_qn == 0 ? 1 : 0))),
+                       (uint32_t)sb,
+                       (uint32_t)x_step,
+                       (uint32_t)y_step };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwpconv_pipe, bufs, 4,

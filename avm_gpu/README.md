@@ -366,6 +366,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       even/uneven weights x 6 subpel positions, phase-dispatched reference) and
       the seam takes every shape (50,160 compound blocks in the gate, bitstream
       unchanged)
+- [x] compound over a scaled reference in the kernel: 1/1024 per-pixel phase,
+      gated against `av2_highbd_convolve_2d_scale_c()` (2 bitdepths x even/uneven
+      x 3 scales); the seam still declines it (see below)
 - [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
       kernel when `AV2_GPU_INTER=1` (single reference, unscaled or scaled,
       8-tap), with the encoder bitstream gate on a half-pel motion clip
@@ -388,6 +391,12 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
+- Scaled compound: the kernel models it and is gated, but the **seam** refuses
+  it because the path crashes for a 64x64 compound block - `avm_gpu_seam_repro`
+  trips it at iteration 14 while the same run with the GPU call skipped passes,
+  so it is in the new plumbing (buffer sizing or the window arithmetic for that
+  shape), not in the C reference or the kernel arithmetic. This is the next
+  defect to fix.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.

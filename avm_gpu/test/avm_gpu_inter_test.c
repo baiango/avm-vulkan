@@ -443,7 +443,7 @@ int main(void) {
                   (const int16_t *)av2_sub_pel_filters_8,
                   (const int16_t *)av2_sub_pel_filters_8, kPos[p][0],
                   kPos[p][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
-                  DST_STRIDE, 0, 0, 0, 0, 0, gpu, DST_STRIDE, err) != 0) {
+                  DST_STRIDE, 0, 0, 0, 0, 0, 0, 16, 16, gpu, DST_STRIDE, err) != 0) {
             fprintf(stderr, "avm_gpu cwp pass1: %s\n", err);
             return 1;
           }
@@ -467,8 +467,8 @@ int main(void) {
                   (const int16_t *)av2_sub_pel_filters_8,
                   (const int16_t *)av2_sub_pel_filters_8, kPos[p][0],
                   kPos[p][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
-                  DST_STRIDE, 1, 1, uneven, conv.fwd_offset, conv.bck_offset,
-                  gpu, DST_STRIDE, err) != 0) {
+                  DST_STRIDE, 1, 1, uneven, conv.fwd_offset, conv.bck_offset, 0,
+                  16, 16, gpu, DST_STRIDE, err) != 0) {
             fprintf(stderr, "avm_gpu cwp pass2: %s\n", err);
             return 1;
           }
@@ -488,6 +488,85 @@ int main(void) {
           printf("cwp bd%-2d %s (%2d,%2d) %-6d %10.3f %10.3f %s\n", bd,
                  uneven ? "uneven" : "even  ", kPos[p][0], kPos[p][1], n, 0.0,
                  0.0, diff ? "MISMATCH" : "ok");
+        }
+      }
+    }
+  }
+
+  /* Compound over a scaled reference: the facade runs
+   * av2_highbd_convolve_2d_scale_c() with the two-pass compound combine, so the
+   * reference here is that function with per-pixel 1/1024 phases. */
+  {
+    InterpFilterParams fp_x;
+    InterpFilterParams fp_y;
+    memset(&fp_x, 0, sizeof(fp_x));
+    memset(&fp_y, 0, sizeof(fp_y));
+    fp_x.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_x.taps = 8;
+    fp_y.filter_ptr = (const int16_t *)av2_sub_pel_filters_8;
+    fp_y.taps = 8;
+    uint16_t cpu_conv[64 * DST_STRIDE], gpu_conv[64 * DST_STRIDE];
+    static const int kStep[3] = { 910, 768, 1024 };
+    static const int kSub[3][2] = { { 512, 333 }, { 0, 1023 }, { 300, 700 } };
+    for (int bd = 10; bd <= 12; bd += 2) {
+      for (int uneven = 0; uneven <= 1; uneven++) {
+        for (size_t st = 0; st < 3; st++) {
+          const int n = 16;
+          const int sx = 16, sy = 12;
+          ConvolveParams conv =
+              get_conv_params_no_round(0, 0, cpu_conv, DST_STRIDE, 1, bd);
+          if (uneven) {
+            conv.fwd_offset = 10;
+            conv.bck_offset = 6;
+          }
+          memset(cpu_conv, 0, sizeof(cpu_conv));
+          memset(gpu_conv, 0, sizeof(gpu_conv));
+          memset(cpu, 0, sizeof(cpu));
+          memset(gpu, 0, sizeof(gpu));
+          conv.do_average = 0;
+          av2_highbd_convolve_2d_scale_c(
+              plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE, n, n, &fp_x,
+              &fp_y, kSub[st][0], kStep[st], kSub[st][1], kStep[st], &conv, bd);
+          int diff = 0;
+          if (avm_gpu_inter_cwp_convolve(
+                  ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                  (const int16_t *)av2_sub_pel_filters_8,
+                  (const int16_t *)av2_sub_pel_filters_8, kSub[st][0],
+                  kSub[st][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
+                  DST_STRIDE, 0, 0, 0, 0, 0, 1, kStep[st], kStep[st], gpu,
+                  DST_STRIDE, err) != 0) {
+            fprintf(stderr, "avm_gpu cwp scaled pass1: %s\n", err);
+            return 1;
+          }
+          for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+              if (cpu_conv[y * DST_STRIDE + x] != gpu_conv[y * DST_STRIDE + x])
+                diff++;
+            }
+          }
+          conv.do_average = 1;
+          av2_highbd_convolve_2d_scale_c(
+              plane + sy * SRC_W + sx, SRC_W, cpu, DST_STRIDE, n, n, &fp_x,
+              &fp_y, kSub[st][0], kStep[st], kSub[st][1], kStep[st], &conv, bd);
+          if (avm_gpu_inter_cwp_convolve(
+                  ctx, inter, plane, SRC_W, SRC_H, sx, sy,
+                  (const int16_t *)av2_sub_pel_filters_8,
+                  (const int16_t *)av2_sub_pel_filters_8, kSub[st][0],
+                  kSub[st][1], n, n, bd, conv.round_0, conv.round_1, gpu_conv,
+                  DST_STRIDE, 1, 1, uneven, conv.fwd_offset, conv.bck_offset, 1,
+                  kStep[st], kStep[st], gpu, DST_STRIDE, err) != 0) {
+            fprintf(stderr, "avm_gpu cwp scaled pass2: %s\n", err);
+            return 1;
+          }
+          for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+              if (cpu[y * DST_STRIDE + x] != gpu[y * DST_STRIDE + x]) diff++;
+            }
+          }
+          failures += diff != 0;
+          printf("cwp scaled bd%-2d %s step%-4d %-6d %10.3f %10.3f %s\n", bd,
+                 uneven ? "uneven" : "even  ", kStep[st], n, 0.0, 0.0,
+                 diff ? "MISMATCH" : "ok");
         }
       }
     }

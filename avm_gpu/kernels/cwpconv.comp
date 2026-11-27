@@ -22,6 +22,8 @@ layout(push_constant) uniform PC {
   uint round0, round1;
   uint do_average, uneven, fwd, bck, conv_index;
   uint mode;  // 0 = 2D, 1 = x only, 2 = y only, 3 = copy (no subpel)
+  uint sb;    // phase bits: 4 (1/16, unscaled) or 10 (1/1024, scaled ref)
+  uint x_step, y_step;
 } pc;
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
@@ -45,8 +47,14 @@ void main() {
   const int r1 = int(pc.round1);
   // av2_highbd_cwp_convolve_2d_c() picks the filter row from the subpel phase
   // and the sample block from the pixel index: no integer shift by the phase.
-  const int fh = int(pc.x0) * 8;
-  const int fv = 128 + int(pc.y0) * 8;
+  const int sb = int(pc.sb);
+  const int fb = sb - 4;  // filter row = phase >> fb
+  const int xq = int(pc.x0) + x * int(pc.x_step);
+  const int yq = int(pc.y0) + y * int(pc.y_step);
+  const int base_x = xq >> sb;
+  const int base_y = yq >> sb;
+  const int fh = ((xq >> fb) & 15) * 8;
+  const int fv = 128 + ((yq >> fb) & 15) * 8;
 
   const int mode = int(pc.mode);
   const int offset_bits = bd + 14 - r0;
@@ -57,14 +65,15 @@ void main() {
   if (mode == 3) {
     // av2_highbd_cwp_convolve_2d_copy_c(): both passes are CONV_BUF_TYPE
     // arithmetic, so the additions wrap at 16 bits.
-    res = (int(s[(int(pc.sy) + y) * ss + int(pc.sx) + x]) << round_bits) & 0xffff;
+    res = (int(s[(int(pc.sy) + y) * ss + int(pc.sx) + x]) << round_bits) &
+          0xffff;
     res = (res + round_offset) & 0xffff;
   } else if (mode == 1) {
     // av2_highbd_cwp_convolve_x_c(): horizontal only, no vertical bias.
     int sum = 0;
     for (int kx = 0; kx < 8; ++kx) {
-      sum += f[fh + kx] *
-             int(s[(int(pc.sy) + y) * ss + int(pc.sx) + x + kx - 3]);
+      sum += f[fh + kx] * int(s[(int(pc.sy) + y) * ss + int(pc.sx) + base_x +
+                                kx - 3]);
     }
     const int hbits = 7 - r1;  // FILTER_BITS - round_1
     res = ((1 << hbits) * round_pow2(sum, r0) + round_offset) & 0xffff;
@@ -73,7 +82,8 @@ void main() {
     // the round.
     int sum = 0;
     for (int ky = 0; ky < 8; ++ky) {
-      sum += f[fv + ky] * int(s[(int(pc.sy) + y + ky - 3) * ss + int(pc.sx) + x]);
+      sum += f[fv + ky] *
+             int(s[(int(pc.sy) + base_y + ky - 3) * ss + int(pc.sx) + x]);
     }
     const int ybits = 7 - r0;  // FILTER_BITS - round_0
     res = (round_pow2(sum * (1 << ybits), r1) + round_offset) & 0xffff;
@@ -81,10 +91,10 @@ void main() {
     int im[8];
     const int hbias = 1 << (bd + 6);   // 1 << (bd + FILTER_BITS - 1)
     for (int ky = 0; ky < 8; ++ky) {
-      const int row = int(pc.sy) + y + ky - 3;
+      const int row = int(pc.sy) + base_y + ky - 3;
       int sum = hbias;
       for (int kx = 0; kx < 8; ++kx) {
-        sum += f[fh + kx] * int(s[row * ss + int(pc.sx) + x + kx - 3]);
+        sum += f[fh + kx] * int(s[row * ss + int(pc.sx) + base_x + kx - 3]);
       }
       im[ky] = (round_pow2(sum, r0) << 16) >> 16;  // stored as int16_t
     }

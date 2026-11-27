@@ -89,8 +89,11 @@ static uint16_t plane[SRC_W * SRC_H];
 static uint16_t cpu_out[DST_STRIDE * DST_STRIDE];
 static uint16_t gpu_out[DST_STRIDE * DST_STRIDE];
 
-/* Compound: two passes over the CWP high-precision buffer. */
-static int run_compound(int n, int sub_x, int sub_y, int uneven) {
+/* Compound: two passes over the CWP high-precision buffer. With scaled the
+ * reference is av2_highbd_convolve_2d_scale_c(), which is what the facade runs
+ * for a scaled reference, and positions/steps are in 1/1024 units. */
+static int run_compound(int n, int sub_x, int sub_y, int uneven, int scaled,
+                        int step) {
   const InterpFilterParams fp_x = { (const int16_t *)av2_sub_pel_filters_8, 8 };
   const InterpFilterParams fp_y = { (const int16_t *)av2_sub_pel_filters_8, 8 };
   static uint16_t c_cpu[DST_STRIDE * 64], c_gpu[DST_STRIDE * 64];
@@ -106,7 +109,11 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
   memset(cpu_out, 0, sizeof(cpu_out));
   memset(gpu_out, 0, sizeof(gpu_out));
   conv.do_average = 0;
-  if (sub_x == 0 && sub_y == 0) {
+  if (scaled) {
+    av2_highbd_convolve_2d_scale_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                   DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, step,
+                                   sub_y, step, &conv, BD);
+  } else if (sub_x == 0 && sub_y == 0) {
     av2_highbd_cwp_convolve_2d_copy_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
                                       DST_STRIDE, n, n, &conv, BD);
   } else if (sub_y == 0) {
@@ -120,11 +127,33 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
                                  DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
                                  &conv, BD);
   }
+  if (getenv("SEAM_NOGPU")) { /* CPU reference only, for bisecting */
+    conv.do_average = 1;
+    if (scaled) {
+      av2_highbd_convolve_2d_scale_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                     DST_STRIDE, n, n, &fp_x, &fp_y, sub_x,
+                                     step, sub_y, step, &conv, BD);
+    } else if (sub_x == 0 && sub_y == 0) {
+      av2_highbd_cwp_convolve_2d_copy_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                        DST_STRIDE, n, n, &conv, BD);
+    } else if (sub_y == 0) {
+      av2_highbd_cwp_convolve_x_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                  DST_STRIDE, n, n, &fp_x, sub_x, &conv, BD);
+    } else if (sub_x == 0) {
+      av2_highbd_cwp_convolve_y_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                  DST_STRIDE, n, n, &fp_y, sub_y, &conv, BD);
+    } else {
+      av2_highbd_cwp_convolve_2d_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                   DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, sub_y,
+                                   &conv, BD);
+    }
+    return 0;
+  }
   if (!avm_gpu_hook_inter(plane + sy * SRC_W + sx, SRC_W, gpu_out, DST_STRIDE,
                           n, n, BD, (const int16_t *)av2_sub_pel_filters_8,
                           (const int16_t *)av2_sub_pel_filters_8, 8, 8, sub_x,
-                          sub_y, conv.round_0, conv.round_1, 0, 16, 16, 1, 0,
-                          c_gpu, DST_STRIDE, conv.fwd_offset,
+                          sub_y, conv.round_0, conv.round_1, scaled, step,
+                          step, 1, 0, c_gpu, DST_STRIDE, conv.fwd_offset,
                           conv.bck_offset)) {
     return -1;
   }
@@ -135,7 +164,11 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
     }
   }
   conv.do_average = 1;
-  if (sub_x == 0 && sub_y == 0) {
+  if (scaled) {
+    av2_highbd_convolve_2d_scale_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
+                                   DST_STRIDE, n, n, &fp_x, &fp_y, sub_x, step,
+                                   sub_y, step, &conv, BD);
+  } else if (sub_x == 0 && sub_y == 0) {
     av2_highbd_cwp_convolve_2d_copy_c(plane + sy * SRC_W + sx, SRC_W, cpu_out,
                                       DST_STRIDE, n, n, &conv, BD);
   } else if (sub_y == 0) {
@@ -152,8 +185,8 @@ static int run_compound(int n, int sub_x, int sub_y, int uneven) {
   if (!avm_gpu_hook_inter(plane + sy * SRC_W + sx, SRC_W, gpu_out, DST_STRIDE,
                           n, n, BD, (const int16_t *)av2_sub_pel_filters_8,
                           (const int16_t *)av2_sub_pel_filters_8, 8, 8, sub_x,
-                          sub_y, conv.round_0, conv.round_1, 0, 16, 16, 1, 1,
-                          c_gpu, DST_STRIDE, conv.fwd_offset,
+                          sub_y, conv.round_0, conv.round_1, scaled, step,
+                          step, 1, 1, c_gpu, DST_STRIDE, conv.fwd_offset,
                           conv.bck_offset)) {
     return -1;
   }
@@ -230,6 +263,7 @@ int main(int argc, char **argv) {
 
   int declined = 0;
   int first_declined_it = -1;
+  const int verbose = getenv("SEAM_VERBOSE") != NULL;
   for (int it = 0; it < iters; it++) {
     const int mode = it % 3;   /* 0 unscaled, 1 scaled, 2 compound */
     const int scaled = mode == 1;
@@ -246,7 +280,7 @@ int main(int argc, char **argv) {
     const int cwp_x = sub_x % 16;
     const int expect_decline = mode == 2 && cwp_y == 0; /* never: y >= 1 */
     const int rc = mode == 2
-                       ? run_compound(n, cwp_x, cwp_y, it % 2)
+                       ? run_compound(n, cwp_x, cwp_y, it % 2, 0, 16)
                        : run_case(scaled, n, sub_x, sub_y, step);
     if (expect_decline && rc < 0) continue;
     if (rc < 0) {
