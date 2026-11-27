@@ -114,7 +114,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference and its compound pass (conv buffer + average), and compound A64 blending |
 | `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk; all three with the compound conv buffer + average |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical; whole-plane (`avm_gpu_deblock_generic()`) and the window the seam uploads (`avm_gpu_deblock_window()`) |
-| `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
+| `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants), whole-buffer and windowed by the seam |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
 | `pcwiener.{h,c}` | PC-Wiener restoration, both stages: `avm_gpu_pcwiener_classify()` and `avm_gpu_pcwiener_filter()`, host-derived tap geometry |
 | `kernels/intra.comp` | intra predictors, one invocation per row |
@@ -213,6 +213,9 @@ Two seams, selected by `AV2_GPU_SAD`:
 | `AV2_GPU_DEBLOCK=1` | `av2/common/av2_loopfilter.c` | every generic deblock edge (`av2_filter_block_plane_{vert,horz}` and the TIP pass) runs one windowed dispatch |
 | `AV2_GPU_DEBLOCK_STATS=1` | `avm_gpu/vulkan_hook_deblock.c` | print the number of edges filtered on the GPU at exit |
 | `AV2_GPU_DEBLOCK_VERIFY=1` | `avm_gpu/vulkan_hook_deblock.c` | run the C filter on the same window and report every differing sample, keeping the C result |
+| `AV2_GPU_CDEF=1` | `av2/common/cdef_block.c` | every CDEF filter block (`av2_cdef_filter_fb()`) runs one dispatch, uploading only its 2/8-sample border |
+| `AV2_GPU_CDEF_STATS=1` | `avm_gpu/vulkan_hook_cdef.c` | print the number of blocks filtered on the GPU at exit |
+| `AV2_GPU_CDEF_VERIFY=1` | `avm_gpu/vulkan_hook_cdef.c` | run the matching C wrapper on the same input and report every differing sample |
 
 Both entries fall through to the exact CPU SAD when no device initialises, so a
 machine without Vulkan still encodes. `AV2_GPU_SAD_STATS=1` prints blocks and
@@ -393,6 +396,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] generic deblock (horizontal + vertical) + parity gate (122,880 cases,
       8 and 10 bit, thresholds 1..16 plus random pairs, windowed entry point)
 - [x] CDEF block filter + parity gate (5760 cases)
+- [x] CDEF call site: `av2_cdef_filter_fb()` runs one dispatch per filter block
+      when `AV2_GPU_CDEF=1` (windowed upload, 2/8-sample border), with the
+      encoder bitstreams at cpu-used 8/4/2 and the decoder md5 unchanged
 - [x] CCSO block pass + parity gate (1008 cases)
 - [x] PC-Wiener restoration filter stage + parity gate (2 geometries x 4 filter
       sets x 2 bitdepths against `av2_convolve_symmetric_highbd_c()`)

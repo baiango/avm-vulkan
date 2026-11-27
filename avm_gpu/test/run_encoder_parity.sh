@@ -381,6 +381,59 @@ if [ "$deblock_fail" -ne 0 ]; then
   exit 1
 fi
 
+# Ninth call site: the CDEF block filter (av2_cdef_filter_fb()). It runs on every
+# non-lossless frame, so the same three streams cover it; each block uploads only
+# its own 2/8-sample bordered window.
+cdef_fail=0
+cdef_check() { # name, clip, args, cpu-bitstream
+  if ! AV2_GPU_CDEF=1 AV2_GPU_CDEF_STATS=1 "$AVMENC" $3 \
+      -o "$work/cdef_$1.ivf" "$2" >"$work/cdef_$1.log" 2>&1; then
+    if grep -q "no Vulkan device\|vkCreateInstance" "$work/cdef_$1.log"; then
+      echo "SKIP: no Vulkan device"
+      exit 77
+    fi
+    echo "FAIL: GPU CDEF encode ($1) failed"
+    tail -20 "$work/cdef_$1.log"
+    exit 1
+  fi
+  if ! grep -q "CDEF hook enabled" "$work/cdef_$1.log"; then
+    echo "FAIL: the Vulkan CDEF hook did not initialise ($1)"
+    tail -20 "$work/cdef_$1.log"
+    exit 1
+  fi
+  cblocks=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) CDEF blocks on the GPU.*/\1/p' "$work/cdef_$1.log")
+  if [ -z "$cblocks" ] || [ "$cblocks" -le 0 ]; then
+    echo "FAIL: the GPU filtered no CDEF block ($1)"
+    tail -20 "$work/cdef_$1.log"
+    exit 1
+  fi
+  echo "cdef $1: $cblocks blocks, md5 $(hash_of "$work/cdef_$1.ivf")"
+  if [ "$(hash_of "$work/cdef_$1.ivf")" != "$(hash_of "$4")" ]; then
+    echo "FAIL: CDEF bitstream differs from the CPU ($1)"
+    cdef_fail=1
+  fi
+}
+
+cdef_check noise8 "$work/noise.y4m" "$LR_ARGS" "$work/lr_cpu.ivf"
+cdef_check cu4 "$work/motion.y4m" \
+  "--limit=5 --good --cpu-used=4 --passes=1 --threads=1" "$work/dbcu4_cpu.ivf"
+cdef_check cu2 "$work/motion.y4m" \
+  "--limit=5 --good --cpu-used=2 --passes=1 --threads=1" "$work/dbcu2_cpu.ivf"
+if [ -x "$AVMDEC" ]; then
+  cdef_dec_cpu=$("$AVMDEC" --md5 "$work/cdef_cu2.ivf" 2>/dev/null |
+    sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' | head -1)
+  cdef_dec_gpu=$(AV2_GPU_CDEF=1 "$AVMDEC" --md5 "$work/cdef_cu2.ivf" 2>/dev/null |
+    sed -n 's/^\([0-9a-f]\{32\}\) .*/\1/p' | head -1)
+  if [ -z "$cdef_dec_gpu" ] || [ "$cdef_dec_cpu" != "$cdef_dec_gpu" ]; then
+    echo "FAIL: GPU CDEF decode differs ($cdef_dec_gpu vs $cdef_dec_cpu)"
+    cdef_fail=1
+  fi
+  echo "cdef decode: md5 $cdef_dec_gpu (gpu) / $cdef_dec_cpu (cpu)"
+fi
+if [ "$cdef_fail" -ne 0 ]; then
+  exit 1
+fi
+
 cpu_hash=$(hash_of "$work/cpu.ivf")
 gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
@@ -436,4 +489,4 @@ if [ "$mask_cpu_hash" != "$mask_hash" ]; then
   exit 1
 fi
 
-echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration and deblock paths"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration, deblock and CDEF paths"

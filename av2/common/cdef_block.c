@@ -18,6 +18,10 @@
 
 #include "av2/common/cdef.h"
 
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_cdef.h"
+#endif
+
 /* Generated from gen_filter_tables.c with 2 padding entries at the
 beginning and end of the table. The cdef direction range is [0, 7] and the
 first index is offset +/-2. This removes the need to constrain the first
@@ -382,13 +386,26 @@ void av2_cdef_filter_fb(uint8_t *dst8, uint16_t *dst16, int dstride,
       const int t =
           (pli ? pri_strength : adjust_strength(pri_strength, var[by][bx]));
       const int strength_index = (sec_strength == 0) | ((t == 0) << 1);
-      cdef_filter_fn[strength_index](
+      uint16_t *const dst_block =
           &dst16[dirinit ? bi << (bw_log2 + bh_log2)
-                         : (by << bh_log2) * dstride + (bx << bw_log2)],
-          dirinit ? 1 << bw_log2 : dstride,
-          &in[(by * CDEF_BSTRIDE << bh_log2) + (bx << bw_log2)], t,
-          sec_strength, pri_strength ? dir[by][bx] : 0, damping, damping,
-          coeff_shift, block_width, block_height);
+                         : (by << bh_log2) * dstride + (bx << bw_log2)];
+      const int dst_stride = dirinit ? 1 << bw_log2 : dstride;
+#if defined(AVM_GPU_HOOKS)
+      if (avm_gpu_hook_cdef(in, 0, CDEF_BSTRIDE, by << bh_log2, bx << bw_log2,
+                            block_width, block_height,
+                            pri_strength ? dir[by][bx] : 0, t, sec_strength,
+                            damping, damping, coeff_shift,
+                            strength_index != 2 && strength_index != 3,
+                            strength_index == 0 || strength_index == 2,
+                            dst_block, dst_stride)) {
+        /* filtered on the GPU */
+      } else
+#endif
+        cdef_filter_fn[strength_index](
+            dst_block, dst_stride,
+            &in[(by * CDEF_BSTRIDE << bh_log2) + (bx << bw_log2)], t,
+            sec_strength, pri_strength ? dir[by][bx] : 0, damping, damping,
+            coeff_shift, block_width, block_height);
     }
   }
 }
