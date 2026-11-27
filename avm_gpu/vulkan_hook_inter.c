@@ -45,6 +45,7 @@ typedef struct inter_hook_state {
   unsigned long warped_scaled;
   unsigned long compound_scaled;
   unsigned long warped_compound;
+  unsigned long warped_compound_cpu;
 } inter_hook_state;
 
 static inter_hook_state g_hook;
@@ -55,11 +56,12 @@ static void print_stats(void) {
     fprintf(stderr,
             "avm_gpu: %lu inter prediction blocks on the GPU (%lu compound, "
             "%lu masked blends, %lu warped, %lu forward transforms, %lu "
-            "masked compound, %lu scaled warped, %lu compound warped C, %lu "
-            "scaled compound)\n",
+            "masked compound, %lu scaled warped, %lu compound warped, %lu "
+            "scaled compound, %lu compound warped C)\n",
             g_hook.blocks, g_hook.compound, g_hook.blends, g_hook.warped,
             g_hook.fwd_txfm, g_hook.d16_blends, g_hook.warped_scaled,
-            g_hook.warped_compound, g_hook.compound_scaled);
+            g_hook.warped_compound, g_hook.compound_scaled,
+            g_hook.warped_compound_cpu);
   }
 }
 
@@ -282,18 +284,14 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                       const uint16_t *ref, int width, int height, int stride,
                       uint16_t *pred, int p_col, int p_row, int p_width,
                       int p_height, int p_stride, int ss_x, int ss_y,
-                      int round_0, const struct scale_factors *sf,
+                      int round_0, int round_1, const struct scale_factors *sf,
                       int use_warp_bd_box, const PadBlock *warp_bd_box,
-                      int is_compound) {
+                      int is_compound, int do_average, uint16_t *conv_dst,
+                      int conv_stride, int fwd_offset, int bck_offset) {
   if (!wmmat || !ref || !pred || p_width <= 0 || p_height <= 0) return 0;
-  /* The kernels model one reference: a compound call writes a high-precision
-   * buffer, and stays on the CPU. */
-  if (is_compound) {
-    pthread_mutex_lock(&g_lock);
-    if (hook_ready_locked()) g_hook.warped_compound++;
-    pthread_mutex_unlock(&g_lock);
-    return 0;
-  }
+  /* A compound call passes the high-precision buffer and its averaging state
+   * to the kernels; a single reference passes NULL. */
+  if (is_compound && !conv_dst) return 0;
   const int scaled = sf != NULL && av2_is_scaled(sf);
   const int use_affine =
       !scaled && use_affine_filter && p_width >= 8 && p_height >= 8;
@@ -302,8 +300,14 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
     if (!use_warp_bd_box || !warp_bd_box) return 0;
   } else if (!use_affine &&
              (use_warp_bd_box || (p_width & 3) || (p_height & 3))) {
-    /* The extended-range kernel models no boundary box, and handles whole 4x4
-     * chunks only. */
+    /* The unscaled extended-range kernel models no boundary box - the encoder
+     * sets one whenever it takes that path - and handles whole 4x4 chunks
+     * only. */
+    if (is_compound) {
+      pthread_mutex_lock(&g_lock);
+      if (hook_ready_locked()) g_hook.warped_compound_cpu++;
+      pthread_mutex_unlock(&g_lock);
+    }
     return 0;
   }
   if (p_width > 128 || p_height > 128) return 0;
@@ -315,6 +319,16 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
     mat[4] = -mat[3];
   }
 
+  avm_gpu_warp_compound cmp;
+  memset(&cmp, 0, sizeof(cmp));
+  cmp.conv = conv_dst;
+  cmp.conv_stride = conv_stride;
+  cmp.do_average = do_average;
+  cmp.uneven = fwd_offset != (1 << (4 - 1)) || bck_offset != (1 << (4 - 1));
+  cmp.fwd = fwd_offset;
+  cmp.bck = bck_offset;
+  const avm_gpu_warp_compound *cmp_ptr = is_compound ? &cmp : NULL;
+
   pthread_mutex_lock(&g_lock);
   int handled = 0;
   if (hook_ready_locked()) {
@@ -324,23 +338,25 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
             ? avm_gpu_warp_affine_scaled(
                   g_hook.ctx, g_hook.warp, mat, ref, width, height, stride,
                   pred, p_col, p_row, p_width, p_height, p_stride, bd, round_0,
-                  ss_x, ss_y, sf->x_scale_fp, sf->y_scale_fp, sf->x_step_q4,
+                  round_1, ss_x, ss_y, sf->x_scale_fp, sf->y_scale_fp, sf->x_step_q4,
                   sf->y_step_q4, (const int32_t *)warp_bd_box,
-                  &av2_ext_warped_filter[0][0], err)
+                  &av2_ext_warped_filter[0][0], cmp_ptr, err)
         : use_affine
             ? avm_gpu_warp_affine(g_hook.ctx, g_hook.warp, mat, ref, width,
                                   height, stride, pred, p_col, p_row, p_width,
-                                  p_height, p_stride, bd, round_0, alpha, beta,
-                                  gamma, delta, ss_x, ss_y,
-                                  &av2_warped_filter[0][0], err)
+                                  p_height, p_stride, bd, round_0, round_1,
+                                  alpha, beta, gamma, delta, ss_x, ss_y,
+                                  &av2_warped_filter[0][0], cmp_ptr, err)
             : avm_gpu_warp_affine_ext(g_hook.ctx, g_hook.warp, mat, ref, width,
                                       height, stride, pred, p_col, p_row,
                                       p_width, p_height, p_stride, bd, round_0,
-                                      ss_x, ss_y, &av2_ext_warped_filter[0][0],
-                                      err);
+                                      round_1, ss_x, ss_y,
+                                      &av2_ext_warped_filter[0][0],
+                                      cmp_ptr, err);
     if (rc == 0) {
       g_hook.warped++;
       if (scaled) g_hook.warped_scaled++;
+      if (is_compound) g_hook.warped_compound++;
       handled = 1;
     } else if (getenv("AV2_GPU_INTER_DEBUG")) {
       fprintf(stderr, "avm_gpu: warp fallback %dx%d: %s\n", p_width, p_height,

@@ -90,9 +90,11 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                       const uint16_t *ref, int width, int height, int stride,
                       uint16_t *pred, int p_col, int p_row, int p_width,
                       int p_height, int p_stride, int ss_x, int ss_y,
-                      int round_0, const struct scale_factors *sf,
-                      int use_warp_bd_box, const PadBlock *warp_bd_box,
-                      int is_compound);
+                      int round_0, int round_1,
+                      const struct scale_factors *sf, int use_warp_bd_box,
+                      const PadBlock *warp_bd_box, int is_compound,
+                      int do_average, uint16_t *conv_dst, int conv_stride,
+                      int fwd_offset, int bck_offset);
 
 /*
  * Forward transform seam: fwd_txfm_c()'s DCT2 path, every size up to 64 (a

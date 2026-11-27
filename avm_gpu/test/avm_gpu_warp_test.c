@@ -123,9 +123,9 @@ int main(void) {
 
         if (avm_gpu_warp_affine(ctx, warp, kMat[m], ref, REF_W, REF_H, REF_W,
                                 gpu, p_col, p_row, pw, ph, PRED_STRIDE, BD,
-                                cp.round_0, kShear[sh][0], kShear[sh][1],
-                                kShear[sh][2], kShear[sh][3], 0, 0,
-                                &av2_warped_filter[0][0], err) != 0) {
+                                cp.round_0, cp.round_1, kShear[sh][0],
+                                kShear[sh][1], kShear[sh][2], kShear[sh][3], 0,
+                                0, &av2_warped_filter[0][0], NULL, err) != 0) {
           fprintf(stderr, "avm_gpu warp: %s\n", err);
           return 1;
         }
@@ -170,10 +170,10 @@ int main(void) {
                                    (int16_t)kShear[sh][3]);
           if (avm_gpu_warp_affine(ctx, warp, kMat[m], ref, REF_W, REF_H, REF_W,
                                   gpu, p_col, p_row, pw, ph, PRED_STRIDE, BD,
-                                  cp.round_0, kShear[sh][0], kShear[sh][1],
-                                  kShear[sh][2], kShear[sh][3], kSub[sub][0],
-                                  kSub[sub][1], &av2_warped_filter[0][0],
-                                  err) != 0) {
+                                  cp.round_0, cp.round_1, kShear[sh][0],
+                                  kShear[sh][1], kShear[sh][2], kShear[sh][3],
+                                  kSub[sub][0], kSub[sub][1],
+                                  &av2_warped_filter[0][0], NULL, err) != 0) {
             fprintf(stderr, "avm_gpu warp: %s\n", err);
             return 1;
           }
@@ -211,8 +211,9 @@ int main(void) {
                                      NULL);
         if (avm_gpu_warp_affine_ext(ctx, warp, kMat[m], ref, REF_W, REF_H,
                                     REF_W, gpu, p_col, p_row, pw, ph,
-                                    PRED_STRIDE, BD, cp.round_0, kSub[sub][0],
-                                    kSub[sub][1], &av2_ext_warped_filter[0][0],
+                                    PRED_STRIDE, BD, cp.round_0, cp.round_1,
+                                    kSub[sub][0], kSub[sub][1],
+                                    &av2_ext_warped_filter[0][0], NULL,
                                     err) != 0) {
           fprintf(stderr, "avm_gpu warp ext: %s\n", err);
           return 1;
@@ -281,10 +282,10 @@ int main(void) {
                 (PadBlock *)box);
             if (avm_gpu_warp_affine_scaled(
                     ctx, warp, kMat[m], ref, rw, rh, REF_W, gpu, p_col, p_row,
-                    pw, ph, PRED_STRIDE, BD, cp.round_0, kSub[sub][0],
-                    kSub[sub][1], sf.x_scale_fp, sf.y_scale_fp, sf.x_step_q4,
-                    sf.y_step_q4, box, &av2_ext_warped_filter[0][0], err) !=
-                0) {
+                    pw, ph, PRED_STRIDE, BD, cp.round_0, cp.round_1,
+                    kSub[sub][0], kSub[sub][1], sf.x_scale_fp, sf.y_scale_fp,
+                    sf.x_step_q4, sf.y_step_q4, box,
+                    &av2_ext_warped_filter[0][0], NULL, err) != 0) {
               fprintf(stderr, "avm_gpu warp scaled: %s\n", err);
               return 1;
             }
@@ -349,9 +350,9 @@ int main(void) {
           &rsf, 1, (PadBlock *)rbox);
       if (avm_gpu_warp_affine_scaled(
               ctx, warp, kRegMat[m], plane, rw, rh, st, rg, 16, 0, 16, 16, st,
-              BD, cp.round_0, 0, 0, rsf.x_scale_fp, rsf.y_scale_fp,
-              rsf.x_step_q4, rsf.y_step_q4, rbox, &av2_ext_warped_filter[0][0],
-              err) != 0) {
+              BD, cp.round_0, cp.round_1, 0, 0, rsf.x_scale_fp, rsf.y_scale_fp,
+              rsf.x_step_q4, rsf.y_step_q4, rbox,
+              &av2_ext_warped_filter[0][0], NULL, err) != 0) {
         fprintf(stderr, "avm_gpu warp scaled regression: %s\n", err);
         return 1;
       }
@@ -370,6 +371,127 @@ int main(void) {
     free(plane);
     free(rc);
     free(rg);
+  }
+
+  /* Compound (two-reference) warp: the first call writes the high-precision
+   * buffer, the second averages it and writes the pixels. Checked against all
+   * three C variants with conv_params->is_compound, plain and weighted. */
+  {
+    static const int kCmpSize[3][2] = { { 8, 8 }, { 16, 8 }, { 16, 16 } };
+    static uint16_t conv_cpu[PRED_STRIDE * REF_H], conv_gpu[PRED_STRIDE * REF_H];
+    /* The two references must differ, otherwise the weighted and the plain
+     * average agree and a broken weighting would hide. */
+    uint16_t *ref2 = malloc(sizeof(uint16_t) * REF_W * REF_H);
+    if (!ref2) return 1;
+    for (int i = 0; i < REF_W * REF_H; i++) {
+      ref2[i] = (uint16_t)(rnd() & ((1 << BD) - 1));
+    }
+    for (size_t m = 0; m < 2; m++) {         /* identity-ish and sheared */
+      for (size_t s = 0; s < 3; s++) {       /* block sizes */
+        for (int avg = 0; avg < 2; avg++) {  /* plain / weighted */
+          for (int variant = 0; variant < 3; variant++) { /* affine/ext/scaled */
+            const int pw = kCmpSize[s][0], ph = kCmpSize[s][1];
+            ConvolveParams cc =
+                get_conv_params_no_round(0, 0, conv_cpu, PRED_STRIDE, 1, BD);
+            ConvolveParams cg =
+                get_conv_params_no_round(0, 0, conv_gpu, PRED_STRIDE, 1, BD);
+            if (avg) {
+              cc.fwd_offset = cg.fwd_offset = 10;
+              cc.bck_offset = cg.bck_offset = 6;
+            }
+            avm_gpu_warp_compound cmp_gpu;
+            memset(&cmp_gpu, 0, sizeof(cmp_gpu));
+            cmp_gpu.conv = conv_gpu;
+            cmp_gpu.conv_stride = PRED_STRIDE;
+            cmp_gpu.uneven = avg;
+            cmp_gpu.fwd = cg.fwd_offset;
+            cmp_gpu.bck = cg.bck_offset;
+            struct scale_factors sf;
+            av2_setup_scale_factors_for_frame(&sf, REF_W, REF_H, 80, 72);
+            static int32_t cbox[32 * 32 * 4];
+            for (int i = 0; i < 32 * 32; i++) {
+              cbox[i * 4 + 0] = 0;
+              cbox[i * 4 + 1] = REF_W;
+              cbox[i * 4 + 2] = 0;
+              cbox[i * 4 + 3] = REF_H;
+            }
+            int diff = 0;
+            /* Pass 0 is the first reference (writes the high-precision
+             * buffer), pass 1 the second (averages it with its own sum). */
+            memset(conv_cpu, 0, sizeof(conv_cpu));
+            memset(conv_gpu, 0, sizeof(conv_gpu));
+            for (int pass = 0; pass < 2; pass++) {
+              const uint16_t *r = pass ? ref2 : ref;
+              memset(cpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+              memset(gpu, 0, sizeof(uint16_t) * PRED_STRIDE * REF_H);
+              cc.do_average = pass;
+              cg.do_average = pass;
+              cmp_gpu.do_average = pass;
+              if (variant == 0) {
+                av2_highbd_warp_affine_c(
+                    kMat[m], r, REF_W, REF_H, REF_W, cpu, p_col, p_row, pw,
+                    ph, PRED_STRIDE, 0, 0, BD, &cc, (int16_t)kShear[1][0],
+                    (int16_t)kShear[1][1], (int16_t)kShear[1][2],
+                    (int16_t)kShear[1][3]);
+                if (avm_gpu_warp_affine(
+                        ctx, warp, kMat[m], r, REF_W, REF_H, REF_W, gpu,
+                        p_col, p_row, pw, ph, PRED_STRIDE, BD, cg.round_0,
+                        cg.round_1, kShear[1][0], kShear[1][1],
+                        kShear[1][2], kShear[1][3], 0, 0,
+                        &av2_warped_filter[0][0], &cmp_gpu, err) != 0) {
+                  fprintf(stderr, "avm_gpu warp compound: %s\n", err);
+                  return 1;
+                }
+              } else if (variant == 1) {
+                av2_ext_highbd_warp_affine_c(
+                    kMat[m], r, REF_W, REF_H, REF_W, cpu, p_col, p_row, pw,
+                    ph, PRED_STRIDE, 0, 0, BD, &cc, 0, NULL);
+                if (avm_gpu_warp_affine_ext(
+                        ctx, warp, kMat[m], r, REF_W, REF_H, REF_W, gpu,
+                        p_col, p_row, pw, ph, PRED_STRIDE, BD, cg.round_0,
+                        cg.round_1, 0, 0, &av2_ext_warped_filter[0][0],
+                        &cmp_gpu, err) != 0) {
+                  fprintf(stderr, "avm_gpu warp ext compound: %s\n", err);
+                  return 1;
+                }
+              } else {
+                av2_ext_highbd_warp_affine_scaled_c(
+                    kMat[m], r, REF_W, REF_H, REF_W, cpu, p_col, p_row, pw,
+                    ph, PRED_STRIDE, 0, 0, BD, &cc, &sf, 1, (PadBlock *)cbox);
+                if (avm_gpu_warp_affine_scaled(
+                        ctx, warp, kMat[m], r, REF_W, REF_H, REF_W, gpu,
+                        p_col, p_row, pw, ph, PRED_STRIDE, BD, cg.round_0,
+                        cg.round_1, 0, 0, sf.x_scale_fp, sf.y_scale_fp,
+                        sf.x_step_q4, sf.y_step_q4, cbox,
+                        &av2_ext_warped_filter[0][0], &cmp_gpu, err) != 0) {
+                  fprintf(stderr, "avm_gpu warp scaled compound: %s\n", err);
+                  return 1;
+                }
+              }
+              for (int y = 0; y < ph; y++) {
+                for (int x = 0; x < pw; x++) {
+                  if (conv_cpu[y * PRED_STRIDE + x] !=
+                      conv_gpu[y * PRED_STRIDE + x]) {
+                    diff++;
+                  }
+                  if (cpu[y * PRED_STRIDE + x] != gpu[y * PRED_STRIDE + x]) {
+                    diff++;
+                  }
+                }
+              }
+            }
+            cases++;
+            failures += diff != 0;
+            if (diff) {
+              printf("  warp compound mat %zu %dx%d avg %d variant %d: %d "
+                     "samples\n",
+                     m, pw, ph, avg, variant, diff);
+            }
+          }
+        }
+      }
+    }
+    free(ref2);
   }
 
   printf("%-8s %6s %s\n", "warp", "cases", failures ? "MISMATCH" : "ok");

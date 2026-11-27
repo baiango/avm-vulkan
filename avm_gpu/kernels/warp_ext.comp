@@ -11,6 +11,8 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) readonly buffer Ref { uint ref_px[]; };
 layout(std430, binding = 1) buffer Pred { uint pred_px[]; };
 layout(std430, binding = 2) readonly buffer ExtFilt { int wf[]; };
+// High-precision compound buffer (only used when compound != 0).
+layout(std430, binding = 3) buffer Conv { uint conv[]; };
 
 layout(push_constant) uniform PC {
   uint width;
@@ -31,8 +33,13 @@ layout(push_constant) uniform PC {
   int m5;
   uint ss_x;
   uint ss_y;
-  uint pad0;
-  uint pad1;
+  uint round_1;
+  uint compound;    // is_compound: high-precision buffer + average
+  uint do_average;
+  uint conv_stride;
+  uint uneven;
+  int fwd;
+  int bck;
 } pc;
 
 const int FILTER_BITS = 7;
@@ -75,7 +82,8 @@ void main() {
   const int stride = int(pc.stride);
   const int bd = int(pc.bd);
   const int reduce_bits_horiz = int(pc.round_0);
-  const int reduce_bits_vert = 2 * FILTER_BITS - reduce_bits_horiz;
+  const int reduce_bits_vert =
+      pc.compound != 0u ? int(pc.round_1) : 2 * FILTER_BITS - reduce_bits_horiz;
   const int offset_bits_horiz = bd + FILTER_BITS - 1;
   const int offset_bits_vert = bd + 2 * FILTER_BITS - reduce_bits_horiz;
 
@@ -135,10 +143,31 @@ void main() {
                wf[offs_y * EXT_WARP_STORAGE_TAPS + m];
       }
       sum = (sum + (1 << (reduce_bits_vert - 1))) >> reduce_bits_vert;
-      const int v = sum - (1 << (bd - 1)) - (1 << bd);
-      const uint idx = uint((i0 - int(pc.p_row) + k + 2) * int(pc.p_stride) +
-                            (j0 - int(pc.p_col) + l + 2));
-      pred_px[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
+      const int ph = i0 - int(pc.p_row) + k + 2;
+      const int pw = j0 - int(pc.p_col) + l + 2;
+      const uint idx = uint(ph * int(pc.p_stride) + pw);
+      if (pc.compound != 0u) {
+        /* conv_params->is_compound: the first reference writes the 16-bit
+         * buffer, the second averages it with its own sum. */
+        const uint cidx = uint(ph * int(pc.conv_stride) + pw);
+        if (pc.do_average == 0u) {
+          conv[cidx] = uint(sum & 0xffff);
+        } else {
+          const int offset_bits = bd + 2 * FILTER_BITS - reduce_bits_horiz;
+          const int round_bits =
+              2 * FILTER_BITS - reduce_bits_horiz - int(pc.round_1);
+          int tmp = int(conv[cidx]);
+          tmp = pc.uneven != 0u ? (tmp * pc.fwd + sum * pc.bck) >> 4
+                                : (tmp + sum) >> 1;
+          tmp -= (1 << (offset_bits - int(pc.round_1))) +
+                 (1 << (offset_bits - int(pc.round_1) - 1));
+          tmp = (tmp + (1 << (round_bits - 1))) >> round_bits;
+          pred_px[idx] = uint(tmp < 0 ? 0 : (tmp > maxv ? maxv : tmp));
+        }
+      } else {
+        const int v = sum - (1 << (bd - 1)) - (1 << bd);
+        pred_px[idx] = uint(v < 0 ? 0 : (v > maxv ? maxv : v));
+      }
     }
   }
 }

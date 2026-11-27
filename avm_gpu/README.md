@@ -101,7 +101,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `vulkan_intra.{h,c}` | intra DC/V/H/DC_LEFT/DC_TOP/DC_128, availability rule, clamped edge builder |
 | `vulkan_itxfm.{h,c}` | batched inverse DCT 4..64 with reconstruction add (`avm_gpu_itxfm_add_tx()` for the 64-wide/tall sizes) |
 | `vulkan_inter.{h,c}` | 8-tap subpel inter prediction incl. scaled reference and its compound pass (conv buffer + average), and compound A64 blending |
-| `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk |
+| `vulkan_warp.{h,c}` | affine (warped) prediction, one invocation per 8x8 block; extended-range and scaled variants per 4x4 chunk; all three with the compound conv buffer + average |
 | `vulkan_deblock.{h,c}` | generic asymmetric deblock, horizontal and vertical |
 | `vulkan_cdef.{h,c}` | CDEF block filter (the four 16-bit wrapper variants) |
 | `vulkan_ccso.{h,c}` | CCSO block pass with the 64-band LUT |
@@ -408,9 +408,18 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
-- Compound warped prediction (a warp on a two-reference block, 2,406 / 3,456
-  blocks at cpu-used 8 / 2) still runs on the CPU: it writes a high-precision
-  buffer and the warp kernels model single-reference output.
+- Compound warped prediction (a warp on a two-reference block) is on the GPU:
+  the three warp kernels write the 16-bit conv buffer for the first reference
+  and average it with the second (weighted or plain, round offset,
+  `ROUND_POWER_OF_TWO`), gated by `avm_gpu_warp_test` with two *different*
+  references so the weighting cannot hide (36 compound cases: three variants x
+  two matrices x three sizes x plain/weighted). The encoder streams keep their
+  md5 with 312 / 3,244 compound warps on the GPU, but no gate stream's final
+  bitstream depends on a compound-warp prediction - they all lose the RD
+  decision - so the stream-level proof there is "unchanged md5 with a non-zero
+  count", not "the result is used". The unscaled extended-range path always
+  carries a boundary box the ext kernel does not model, so those calls (8 at
+  cpu-used 8, 212 at cpu-used 2) still run on the CPU.
 - Data model: packed 16-bit storage covers SAD, variance and the forward DCT;
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the

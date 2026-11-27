@@ -26,6 +26,21 @@ extern "C" {
 
 typedef struct avm_gpu_warp avm_gpu_warp;
 
+/*
+ * Compound prediction state for the warp kernels: conv is the caller's
+ * high-precision buffer (conv_stride samples per row), do_average selects the
+ * second reference (average with the buffer, round offset, clip), uneven picks
+ * the weighted average with fwd/bck. Pass NULL for a single-reference call.
+ */
+typedef struct avm_gpu_warp_compound {
+  uint16_t *conv;
+  int conv_stride;
+  int do_average;
+  int uneven;
+  int fwd;
+  int bck;
+} avm_gpu_warp_compound;
+
 int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
                         char err[AVM_GPU_ERR_LEN]);
 void avm_gpu_warp_destroy(avm_gpu_ctx *ctx, avm_gpu_warp *warp);
@@ -41,8 +56,9 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                         const int32_t mat[6], const uint16_t *ref, int width,
                         int height, int stride, uint16_t *pred, int p_col,
                         int p_row, int p_width, int p_height, int p_stride,
-                        int bd, int round_0, int alpha, int beta, int gamma,
-                        int delta, int ss_x, int ss_y, const int16_t *filter,
+                        int bd, int round_0, int round_1, int alpha, int beta,
+                        int gamma, int delta, int ss_x, int ss_y,
+                        const int16_t *filter, const avm_gpu_warp_compound *cmp,
                         char err[AVM_GPU_ERR_LEN]);
 
 /*
@@ -54,8 +70,9 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                             const int32_t mat[6], const uint16_t *ref,
                             int width, int height, int stride, uint16_t *pred,
                             int p_col, int p_row, int p_width, int p_height,
-                            int p_stride, int bd, int round_0, int ss_x,
-                            int ss_y, const int16_t *filter,
+                            int p_stride, int bd, int round_0, int round_1,
+                            int ss_x, int ss_y, const int16_t *filter,
+                            const avm_gpu_warp_compound *cmp,
                             char err[AVM_GPU_ERR_LEN]);
 
 /*
@@ -71,9 +88,11 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *warp,
                                int width, int height, int stride,
                                uint16_t *pred, int p_col, int p_row,
                                int p_width, int p_height, int p_stride, int bd,
-                               int round_0, int ss_x, int ss_y, int x_scale_fp,
-                               int y_scale_fp, int x_step_q4, int y_step_q4,
-                               const int32_t *box, const int16_t *filter,
+                               int round_0, int round_1, int ss_x, int ss_y,
+                               int x_scale_fp, int y_scale_fp, int x_step_q4,
+                               int y_step_q4, const int32_t *box,
+                               const int16_t *filter,
+                               const avm_gpu_warp_compound *cmp,
                                char err[AVM_GPU_ERR_LEN]);
 
 #ifdef __cplusplus
