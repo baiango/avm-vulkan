@@ -425,13 +425,21 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   `av2_ext_highbd_warp_affine_scaled_c()` by `avm_gpu_warp_test`). A compound
   warp writes a high-precision buffer and still runs on the CPU; the stats line
   counts those (`%lu compound warped C`).
-- Scaled-reference streams are **not** bit-identical yet at every ratio: with
-  `--resize-mode=1` the 12/16 ratio (4:3) reproduces the CPU bitstream with
-  12,452 scaled warped blocks on the GPU, but the 9/16 ratio (16:9) differs -
-  and does so with the scaled warp seam *and* the scaled translation seam
-  declined, so the mismatch is in the scaled 8-tap convolve for steps other
-  than the 910 the seam reproducer uses. Not gated by the encoder parity script
-  for exactly that reason.
+- Scaled-reference streams are bit-identical: `--resize-mode=1` with
+  `--resize-denominator=9` (16:9, 187k inter blocks incl. 15,575 scaled warped)
+  and `12` (4:3, 102k incl. 12,479) both reproduce the CPU bitstream. Two bugs
+  stood between the first gate and this: the scaled warp kernel's 64x32
+  multiply sign-extended the low word of the projection (so a chunk whose
+  rescaled corner had a negative low word got a garbage position), and the
+  inter seam's upload window was one row short (`last_base + 7` instead of
+  `last_base + 8`), which corrupted the last row of blocks. Both are covered:
+  the multiply by an explicit `avm_gpu_warp_test` regression case, the window by
+  the resized-stream gate (each was reintroduced and the gates failed).
+- A scaled reference's **compound** prediction runs on the CPU on purpose: the C
+  facade sends every scaled call, compound or not, through
+  `av2_highbd_convolve_2d_scale()`, while the CWP kernel models
+  `av2_highbd_cwp_convolve_*_c()`, the unscaled compound path. The seam declines
+  those calls (the stats line counts the handled ones).
 - Wedge-mask blending is wired for both paths: `combine_interintra_highbd()`
   (the A64 blend) and `build_masked_compound_no_round()` (the d16 masked
   compound). The encoder only builds inter-intra masks at slower presets

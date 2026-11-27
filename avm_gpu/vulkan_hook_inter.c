@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "avm_dsp/avm_filter.h"
+#include "av2/common/convolve.h"
 #include "av2/common/mv.h"
 #include "av2/common/warped_motion.h"
 #include "avm_gpu/vulkan_gpu.h"
@@ -117,6 +118,12 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
    * unscaled; the kernel has a path for each filter shape, matching the
    * function the C dispatches to (2D, x only, y only, copy). */
   if (is_compound && !conv_dst) return 0;
+  /* A scaled reference's compound prediction is not the CWP family: the C
+   * facade sends every scaled call, compound or not, through
+   * av2_highbd_convolve_2d_scale(), while the CWP kernel models
+   * av2_highbd_cwp_convolve_*_c() (the unscaled compound path). Those calls
+   * stay on the CPU until the scale convolve has its own compound pass. */
+  if (is_compound && scaled) return 0;
   /* An unscaled call must carry 1/16 steps: anything else would make the window
    * arithmetic below (which divides by the subpel bit count) read far outside
    * the caller's plane. A scaled call's steps are bounded by 1 << 10. */
@@ -149,15 +156,15 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
     const uint16_t *window = src - HOOK_BORDER * src_stride - HOOK_BORDER;
     const int subpel_bits = scaled ? SCALE_SUBPEL_BITS : 4;
     const int last_by = (((h - 1) * y_step_qn) + subpel_y_qn) >> subpel_bits;
-    /* Minimum, not slack: the host requires src_rows >= sy + last_base + 4 with
-     * sy == lead == 3, i.e. last_base + 7 rows. Measured with
-     * avm_gpu_seam_repro: last_base + 7 agrees over 800 comparisons, one row
-     * less makes the entry point decline every case (and the reproducer now
-     * treats a decline as a failure, which an earlier revision of it did not -
-     * that is how a short window stayed invisible). */
-    /* The compound entry point bounds the block by w/h (+4 taps), not by the
-     * last base row, so it needs one row more than the sr path. */
-    const int rows = last_by + 2 * HOOK_BORDER + (is_compound ? 2 : 1);
+    /* Every kernel here reads rows base_y - 3 .. base_y + 4 (the 8-tap
+     * vertical filter over the three border rows above), so the window must
+     * reach last_base + 4: rows = last_base + 4 + HOOK_BORDER + 1 =
+     * last_base + 8. With last_base + 7 the last row of the block was read
+     * from whatever the buffer held before - invisible to avm_gpu_seam_repro,
+     * which uploads the over-read row from the same fresh plane on every call,
+     * but it changed the bottom row of blocks in a resized-reference stream,
+     * where 4,144 blocks differed only in their last row. */
+    const int rows = last_by + 2 * HOOK_BORDER + 2;
     /* Never hand the kernels a window larger than the block plus its border:
      * h + 8 covers every tap reach for both the unscaled and the scaled
      * mapping. */

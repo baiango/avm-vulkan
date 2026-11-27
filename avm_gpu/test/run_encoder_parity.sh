@@ -213,6 +213,42 @@ hash_of() {
   fi
 }
 
+# Sixth call site: resized references. --resize-mode=1 resizes the source, so
+# every block predicts from a scaled reference: the scaled 8-tap convolve, the
+# scaled CWP compound (declined, see below) and the scaled affine kernel. Two
+# ratios: 16:9 (step 1820, the one that exposed a one-row-short window) and
+# 4:3 (step 1365).
+resize_md5s=""
+resize_counts=""
+for den in 9 12; do
+  RESIZE_ARGS="--limit=5 --good --cpu-used=8 --passes=1 --threads=1 --resize-mode=1 --resize-denominator=$den"
+  if ! "$AVMENC" $RESIZE_ARGS -o "$work/resize${den}_cpu.ivf" "$work/motion.y4m" \
+      >"$work/resize${den}_cpu.log" 2>&1; then
+    echo "FAIL: CPU resized-reference encode (denominator $den) failed"
+    tail -20 "$work/resize${den}_cpu.log"
+    exit 1
+  fi
+  if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $RESIZE_ARGS \
+      -o "$work/resize${den}_gpu.ivf" "$work/motion.y4m" \
+      >"$work/resize${den}.log" 2>&1; then
+    if grep -q "no Vulkan device\|vkCreateInstance" "$work/resize${den}.log"; then
+      echo "SKIP: no Vulkan device"
+      exit 77
+    fi
+    echo "FAIL: GPU resized-reference encode (denominator $den) failed"
+    tail -20 "$work/resize${den}.log"
+    exit 1
+  fi
+  sw=$(sed -n 's/.* \([0-9][0-9]*\) scaled warped.*/\1/p' "$work/resize${den}.log")
+  if [ -z "$sw" ] || [ "$sw" -le 0 ]; then
+    echo "FAIL: no scaled warped block predicted on the GPU (denominator $den)"
+    tail -20 "$work/resize${den}.log"
+    exit 1
+  fi
+  resize_md5s="$resize_md5s $den:$(hash_of "$work/resize${den}_cpu.ivf")/$(hash_of "$work/resize${den}_gpu.ivf")"
+  resize_counts="$resize_counts $den:$sw"
+done
+
 cpu_hash=$(hash_of "$work/cpu.ivf")
 gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
@@ -233,6 +269,8 @@ echo "mask bitstream : $(wc -c <"$work/mask_gpu.ivf" | tr -d ' ') bytes, md5 $ma
 lr_cpu_hash=$(hash_of "$work/lr_cpu.ivf")
 lr_hash=$(hash_of "$work/lr_gpu.ivf")
 echo "lr bitstream   : $(wc -c <"$work/lr_gpu.ivf" | tr -d ' ') bytes, md5 $lr_hash ($lrcalls loop-restoration procunits)"
+
+echo "resized streams: ratios$resize_counts (scaled warped blocks), md5$resize_md5s (cpu/gpu)"
 
 var_hash=$(hash_of "$work/var.ivf")
 echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"

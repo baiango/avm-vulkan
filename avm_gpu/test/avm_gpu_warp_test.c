@@ -21,6 +21,7 @@
 
 #include "av2/common/convolve.h"
 #include "av2/common/scale.h"
+#include "avm_dsp/avm_dsp_common.h"
 #include "av2/common/warped_motion.h"
 
 /* warped_motion.h declares the dispatch wrapper, not the _c kernel. */
@@ -249,11 +250,23 @@ int main(void) {
                                         kCurDim[d][0], kCurDim[d][1]);
       const int rw = kRefDim[d][0];
       const int rh = kRefDim[d][1];
-      for (int i = 0; i < 32 * 32; i++) {
-        box[i * 4 + 0] = 0;
-        box[i * 4 + 1] = rw;
-        box[i * 4 + 2] = 0;
-        box[i * 4 + 3] = rh;
+      /* Each 8x8 sub-block gets its own limits, as
+       * av2_get_reference_area_with_padding_single() would produce: the
+       * sub-block's area moved by a few pixels and clipped to the frame. */
+      for (int by = 0; by < 32; by++) {
+        for (int bx = 0; bx < 32; bx++) {
+          const int i = by * 32 + bx;
+          const int mvx = (int)(rnd() % 33) - 16;
+          const int mvy = (int)(rnd() % 33) - 16;
+          const int x0 = AVMMAX(0, bx * 8 + mvx - 8);
+          const int y0 = AVMMAX(0, by * 8 + mvy - 8);
+          const int x1 = AVMMIN(rw, bx * 8 + mvx + 16);
+          const int y1 = AVMMIN(rh, by * 8 + mvy + 16);
+          box[i * 4 + 0] = x0;
+          box[i * 4 + 1] = AVMMAX(x0 + 1, x1);
+          box[i * 4 + 2] = y0;
+          box[i * 4 + 3] = AVMMAX(y0 + 1, y1);
+        }
       }
       for (size_t m = 0; m < 3; m++) {
         for (size_t sub = 0; sub < 3; sub++) {
@@ -296,6 +309,67 @@ int main(void) {
         }
       }
     }
+  }
+
+  /* Scaled warp regression: a reference of 64x64 with a wide stride, a 16x16
+   * block whose rotated projection puts the later chunks' rescaled corners at
+   * negative y, and a boundary box that clips nearly every read. This is the
+   * case a resized-reference stream failed on: the 64x32 multiply of the
+   * projection sign-extended the low word, so those chunks' position was
+   * corrupted. */
+  {
+    const int rw = 64, rh = 64, st = 1152;
+    static const int32_t kRegMat[2][6] = {
+      { 79296, 12224, 73920, -256, -512, 65472 },
+      { 79296, 12224, 73920, 0, -512, 65472 },
+    };
+    uint16_t *plane = calloc((size_t)st * rh, sizeof(*plane));
+    uint16_t *rc = calloc((size_t)st * 32, sizeof(*rc));
+    uint16_t *rg = calloc((size_t)st * 32, sizeof(*rg));
+    static int32_t rbox[32 * 32 * 4];
+    struct scale_factors rsf;
+    if (!plane || !rc || !rg) return 1;
+    av2_setup_scale_factors_for_frame(&rsf, rw, rh, 57, 57);
+    for (int y = 0; y < rh; y++) {
+      for (int x = 0; x < rw; x++) {
+        plane[(size_t)y * st + x] = (uint16_t)(rnd() & 0x3ff);
+      }
+    }
+    for (int i = 0; i < 32 * 32; i++) {
+      rbox[i * 4 + 0] = 29;
+      rbox[i * 4 + 1] = 45;
+      rbox[i * 4 + 2] = 0;
+      rbox[i * 4 + 3] = 12;
+    }
+    for (size_t m = 0; m < 2; m++) {
+      memset(rc, 0, (size_t)st * 32 * sizeof(*rc));
+      memset(rg, 0, (size_t)st * 32 * sizeof(*rg));
+      av2_ext_highbd_warp_affine_scaled_c(
+          kRegMat[m], plane, rw, rh, st, rc, 16, 0, 16, 16, st, 0, 0, BD, &cp,
+          &rsf, 1, (PadBlock *)rbox);
+      if (avm_gpu_warp_affine_scaled(
+              ctx, warp, kRegMat[m], plane, rw, rh, st, rg, 16, 0, 16, 16, st,
+              BD, cp.round_0, 0, 0, rsf.x_scale_fp, rsf.y_scale_fp,
+              rsf.x_step_q4, rsf.y_step_q4, rbox, &av2_ext_warped_filter[0][0],
+              err) != 0) {
+        fprintf(stderr, "avm_gpu warp scaled regression: %s\n", err);
+        return 1;
+      }
+      int diff = 0;
+      for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+          if (rc[(size_t)y * st + x] != rg[(size_t)y * st + x]) diff++;
+        }
+      }
+      cases++;
+      failures += diff != 0;
+      if (diff) {
+        printf("  warp-scaled regression mat %zu: %d differ\n", m, diff);
+      }
+    }
+    free(plane);
+    free(rc);
+    free(rg);
   }
 
   printf("%-8s %6s %s\n", "warp", "cases", failures ? "MISMATCH" : "ok");

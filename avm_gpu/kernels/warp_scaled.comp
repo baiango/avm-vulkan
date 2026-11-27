@@ -101,14 +101,21 @@ void shr1(inout int hi, inout int lo) {
   hi = hi >> 1;
 }
 
-// (hi, lo) * b for a 32-bit b, modulo 2^64.
+// (hi, lo) * b for a non-negative 32-bit b, modulo 2^64.
+//
+// The low word of (hi, lo) is an *unsigned* 32-bit digit of the 64-bit value,
+// so multiplying it with a signed imulExtended sign-extends it and shifts the
+// product's high word by b whenever the digit's top bit is set. That silently
+// corrupted the rescaled chunk position for negative coordinates (a negative
+// y4 was the first case to expose it). umulExtended keeps the digit's meaning;
+// only the low 32 bits of the high-word product are used, as before.
 void mul64x32(int ah, int al, int b, out int rh, out int rl) {
-  int ph, pl, qh, ql;
-  mul64(al, b, ph, pl);
-  mul64(ah, b, qh, ql);
-  rl = pl;
+  uint ph, pl, qh, ql;
+  umulExtended(uint(al), uint(b), ph, pl);
+  umulExtended(uint(ah), uint(b), qh, ql);
+  rl = int(pl);
   // (ql << 32) touches only the high word, so nothing carries into the low one.
-  rh = ph + ql;
+  rh = int(ph) + int(ql);
 }
 
 // ROUND_POWER_OF_TWO_SIGNED_64(v, REF_SCALE_SHIFT): round half away from zero.
