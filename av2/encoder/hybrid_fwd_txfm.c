@@ -887,6 +887,48 @@ void fwd_txfm_c(const int16_t *resi, tran_low_t *coeff, int diff_stride,
   }
 }
 
+#if defined(AVM_GPU_HOOKS)
+/* avm_gpu/: the 1D kernel a TX1D_TYPE needs. Kind 0 is the DCT2 folded
+ * butterfly, 1 the identity scaling, 2 a matrix product. avm_gpu_fwd_kernel()
+ * returns NULL when the kind carries no matrix, and (const int *)-1 when the
+ * size has no kernel for that type (the reference asserts there, so the
+ * encoder never asks). */
+static int avm_gpu_fwd_kind(TX1D_TYPE t) {
+  return t == DCT2 ? 0 : (t == IDT ? 1 : 2);
+}
+
+static int avm_gpu_fwd_idt_scale(int n) {
+  return n == 4 ? 128 : (n == 8 ? 181 : (n == 16 ? 256 : 362));
+}
+
+static const int *avm_gpu_fwd_kernel(TX1D_TYPE t, int n) {
+  if (t == IDT) return NULL;
+  if (t == DCT2) {  /* the folded butterflies read the DCT2 rows */
+    return n == 4    ? &tx_kernel_dct2_size4[FWD_TXFM][0][0]
+           : n == 8  ? &tx_kernel_dct2_size8[FWD_TXFM][0][0]
+           : n == 16 ? &tx_kernel_dct2_size16[FWD_TXFM][0][0]
+                     : &tx_kernel_dct2_size32[FWD_TXFM][0][0];
+  }
+  if (t == DST7) {
+    return n == 4    ? &tx_kernel_adst_size4[FWD_TXFM][0][0]
+           : n == 8  ? &tx_kernel_adst_size8[FWD_TXFM][0][0]
+           : n == 16 ? &tx_kernel_adst_size16[FWD_TXFM][0][0]
+                     : (const int *)-1;
+  }
+  if (t == DCT8) {
+    return n == 4    ? &tx_kernel_fdst_size4[FWD_TXFM][0][0]
+           : n == 8  ? &tx_kernel_fdst_size8[FWD_TXFM][0][0]
+           : n == 16 ? &tx_kernel_fdst_size16[FWD_TXFM][0][0]
+                     : (const int *)-1;
+  }
+  /* FDDT is the DDTX kernel read reversed (front-end flip). */
+  return n == 4    ? &tx_kernel_ddtx_size4[FWD_TXFM][0][0]
+         : n == 8  ? &tx_kernel_ddtx_size8[FWD_TXFM][0][0]
+         : n == 16 ? &tx_kernel_ddtx_size16[FWD_TXFM][0][0]
+                   : (const int *)-1;
+}
+#endif
+
 void av2_fwd_txfm(const int16_t *src_diff, tran_low_t *coeff, int diff_stride,
                   TxfmParam *txfm_param) {
   if (txfm_param->lossless) {
@@ -896,26 +938,46 @@ void av2_fwd_txfm(const int16_t *src_diff, tran_low_t *coeff, int diff_stride,
     }
   }
 #if defined(AVM_GPU_HOOKS)
-  // Optional Vulkan path (avm_gpu/): the DCT2 matrix kernels on the GPU, sizes
-  // up to 32x32. Returns 0 and falls through to the C transform otherwise.
-  if (!txfm_param->lossless && txfm_param->primary_tx_type == DCT_DCT &&
-      !txfm_param->use_ddt &&
-      tx_size_wide[txfm_param->tx_size] <= 64 &&
+  // Optional Vulkan path (avm_gpu/): fwd_txfm_c()'s 1D kernels on the GPU. Each
+  // axis is a DCT2 folded butterfly, an identity scaling or a matrix product
+  // over the DST7 / DCT8 / DDTX kernel, exactly as g_hor_tx_type /
+  // g_ver_tx_type and the DDT substitution select them. Anything the kernels do
+  // not model (a 32-length DST7/DCT8, which the reference asserts against)
+  // falls through to the C transform.
+  if (!txfm_param->lossless && tx_size_wide[txfm_param->tx_size] <= 64 &&
       tx_size_high[txfm_param->tx_size] <= 64) {
     const TX_SIZE txs = txfm_param->tx_size;
     const int tw = tx_size_wide[txs];
     const int th = tx_size_high[txs];
-    const int *mat_w = tw == 4    ? &tx_kernel_dct2_size4[FWD_TXFM][0][0]
-                       : tw == 8  ? &tx_kernel_dct2_size8[FWD_TXFM][0][0]
-                       : tw == 16 ? &tx_kernel_dct2_size16[FWD_TXFM][0][0]
-                                  : &tx_kernel_dct2_size32[FWD_TXFM][0][0];
-    const int *mat_h = th == 4    ? &tx_kernel_dct2_size4[FWD_TXFM][0][0]
-                       : th == 8  ? &tx_kernel_dct2_size8[FWD_TXFM][0][0]
-                       : th == 16 ? &tx_kernel_dct2_size16[FWD_TXFM][0][0]
-                                  : &tx_kernel_dct2_size32[FWD_TXFM][0][0];
-    if (avm_gpu_hook_fwd_txfm(src_diff, coeff, diff_stride, tw, th,
-                              fwd_tx_shift[txs][0], fwd_tx_shift[txs][1],
-                              mat_w, mat_h)) {
+    const int w1 = AVMMIN(tw, 32);
+    const int h1 = AVMMIN(th, 32);
+    TX1D_TYPE row = g_hor_tx_type[txfm_param->primary_tx_type];
+    TX1D_TYPE col = g_ver_tx_type[txfm_param->primary_tx_type];
+    if (txfm_param->use_ddt) {
+      const int ddt_row = (tw == 4 && REPLACE_ADST4) ||
+                          (tw == 8 && REPLACE_ADST8) ||
+                          (tw == 16 && REPLACE_ADST16);
+      if (ddt_row && (row == DST7 || row == DCT8)) {
+        row = (row == DST7) ? DDTX : FDDT;
+      }
+      const int ddt_col = (th == 4 && REPLACE_ADST4) ||
+                          (th == 8 && REPLACE_ADST8) ||
+                          (th == 16 && REPLACE_ADST16);
+      if (ddt_col && (col == DST7 || col == DCT8)) {
+        col = (col == DST7) ? DDTX : FDDT;
+      }
+    }
+    const int kind_w = avm_gpu_fwd_kind(row);
+    const int kind_h = avm_gpu_fwd_kind(col);
+    const int *mat_w = avm_gpu_fwd_kernel(row, w1);
+    const int *mat_h = avm_gpu_fwd_kernel(col, h1);
+    if (mat_w != (const int *)-1 && mat_h != (const int *)-1 &&
+        avm_gpu_hook_fwd_txfm(
+            src_diff, coeff, diff_stride, tw, th, fwd_tx_shift[txs][0],
+            fwd_tx_shift[txs][1], kind_w, kind_h,
+            kind_w == 1 ? avm_gpu_fwd_idt_scale(w1) : 0,
+            kind_h == 1 ? avm_gpu_fwd_idt_scale(h1) : 0, row == FDDT,
+            col == FDDT, mat_w, mat_h)) {
       return;
     }
   }

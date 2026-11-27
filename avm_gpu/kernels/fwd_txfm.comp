@@ -33,6 +33,12 @@ layout(push_constant) uniform PC {
   uint sqrt2;
   uint count;
   uint mat_h_off;    // offset of the height matrix (width matrix is at 0)
+  uint kind_w;       // 0 = DCT2 folded butterflies, 1 = identity (scale), 2 = matrix
+  uint kind_h;
+  int scale_w;       // identity scale: 128 / 181 / 256 / 362 for 4 / 8 / 16 / 32
+  int scale_h;
+  int flip_w;        // FDDT: the kernel matrix is read reversed
+  int flip_h;
 } pc;
 
 const int NEW_SQRT2 = 5793;  // NewSqrt2 with NewSqrt2Bits = 12
@@ -40,10 +46,33 @@ const int NEW_SQRT2_BITS = 12;
 
 int rshift(int v, int n) { return n > 0 ? (v + (1 << (n - 1))) >> n : v; }
 
-// One folded-butterfly pass: reads src[i * in_stride] for i < n, writes
-// dst[k * out_stride] for k < n, with the matrix rows of size n at mat_off.
-void fwd1d(int n, int src_off, int in_stride, int dst_off, int out_stride,
-           int shift, int mat_off, int src[32], out int dst[32]) {
+// One 1D pass over n samples: reads src[i * in_stride], writes
+// dst[k * out_stride].
+//   kind 0 - fwd_txfm_dct2_sizeN_c(): the folded butterflies below,
+//   kind 1 - fwd_txfm_idtx_sizeN_c(): dst[k] = (src[k] * scale + offset) >> shift,
+//   kind 2 - fwd_txfm_{adst,fdst,ddtx,fddt}_sizeN_c(): a plain matrix product
+//            over the n x n kernel at mat_off (DST7 / DCT8 / DDTX / FDDT).
+void fwd1d(int kind, int n, int src_off, int in_stride, int dst_off,
+           int out_stride, int shift, int mat_off, int scale, int flip,
+           int src[32], out int dst[32]) {
+  if (kind == 1) {
+    for (int k = 0; k < n; ++k) {
+      dst[dst_off + k * out_stride] =
+          rshift(src[src_off + k * in_stride] * scale, shift);
+    }
+    return;
+  }
+  if (kind == 2) {
+    for (int k = 0; k < n; ++k) {
+      int acc = 0;
+      for (int i = 0; i < n; ++i) {
+        acc += m[mat_off + k * n + (flip != 0 ? n - 1 - i : i)] *
+               src[src_off + i * in_stride];
+      }
+      dst[dst_off + k * out_stride] = rshift(acc, shift);
+    }
+    return;
+  }
   int a[32];
   int d[32];
   int next_a[32];
@@ -130,7 +159,8 @@ void main() {
   // outputs written contiguously.
   for (int col = 0; col < w; ++col) {
     for (int i = 0; i < h; ++i) line[i] = block[i * w + col];
-    fwd1d(h, 0, 1, 0, 1, int(pc.shift1), int(pc.mat_h_off), line, outv);
+    fwd1d(int(pc.kind_h), h, 0, 1, 0, 1, int(pc.shift1), int(pc.mat_h_off),
+          pc.scale_h, int(pc.flip_h), line, outv);
     // fwd_transform_1d_c() advances dst by n per line: each column's outputs
     // are contiguous, i.e. buf[col * h + k].
     for (int k = 0; k < h; ++k) buf[col * h + k] = outv[k];
@@ -139,7 +169,8 @@ void main() {
   // Pass two: rows with the width matrix, row-major coefficient output.
   for (int row = 0; row < h; ++row) {
     for (int i = 0; i < w; ++i) line[i] = buf[i * h + row];
-    fwd1d(w, 0, 1, 0, 1, int(pc.shift2), 0, line, outv);
+    fwd1d(int(pc.kind_w), w, 0, 1, 0, 1, int(pc.shift2), 0, pc.scale_w,
+          int(pc.flip_w), line, outv);
     for (int k = 0; k < w; ++k) {
       int v = outv[k];
       if (pc.sqrt2 != 0u) v = rshift(v * NEW_SQRT2, NEW_SQRT2_BITS);

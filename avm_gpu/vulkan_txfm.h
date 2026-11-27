@@ -53,9 +53,10 @@ int avm_gpu_txfm_set_source(avm_gpu_ctx *ctx, avm_gpu_txfm *txfm,
  */
 int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
                      int diff_stride, const avm_gpu_txfm_pos *pos, int n,
-                     int tx_w, int tx_h, int shift1, int shift2,
-                     const int *mat_w, const int *mat_h, int32_t *coeff,
-                     char err[AVM_GPU_ERR_LEN]);
+                     int tx_w, int tx_h, int shift1, int shift2, int kind_w,
+                     int kind_h, int scale_w, int scale_h, int flip_w,
+                     int flip_h, const int *mat_w, const int *mat_h,
+                     int32_t *coeff, char err[AVM_GPU_ERR_LEN]);
 
 int avm_gpu_txfm_fdct(avm_gpu_ctx *ctx, avm_gpu_txfm *txfm,
                       const uint32_t *offsets, int n, int size,

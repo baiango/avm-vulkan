@@ -378,9 +378,10 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
 }
 
 int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
-                          int tx_w, int tx_h, int shift1, int shift2,
-                          const int *mat_w, const int *mat_h) {
-  if (!resi || !coeff || !mat_w || !mat_h) return 0;
+                          int tx_w, int tx_h, int shift1, int shift2, int kind_w,
+                          int kind_h, int scale_w, int scale_h, int flip_w,
+                          int flip_h, const int *mat_w, const int *mat_h) {
+  if (!resi || !coeff) return 0;
   if (tx_w < 4 || tx_h < 4 || tx_w > 64 || tx_h > 64 || (tx_w & 3) ||
       (tx_h & 3)) {
     return 0;
@@ -392,7 +393,8 @@ int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
     char err[AVM_GPU_ERR_LEN];
     const avm_gpu_txfm_pos pos = { 0, 0 };
     if (avm_gpu_txfm_fwd(g_hook.ctx, g_hook.txfm, resi, diff_stride, &pos, 1,
-                         tx_w, tx_h, shift1, shift2, mat_w, mat_h, coeff,
+                         tx_w, tx_h, shift1, shift2, kind_w, kind_h, scale_w,
+                         scale_h, flip_w, flip_h, mat_w, mat_h, coeff,
                          err) == 0) {
       g_hook.fwd_txfm++;
       handled = 1;

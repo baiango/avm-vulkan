@@ -97,15 +97,16 @@ int avm_gpu_hook_warp(const int32_t wmmat[8], int wmtype, int alpha, int beta,
                       int fwd_offset, int bck_offset);
 
 /*
- * Forward transform seam: fwd_txfm_c()'s DCT2 path, every size up to 64 (a
- * 64-length axis is box-downsampled first, as the reference does). mat_w/mat_h
- * are
- * tx_kernel_dct2_size{tx}[FWD_TXFM], shift1/shift2 fwd_tx_shift[tx].
- * Inert unless AV2_GPU_FWD_TXFM=1.
+ * Forward transform seam: fwd_txfm_c()'s 1D kernels, every size up to 64 (a
+ * 64-length axis is box-downsampled first, as the reference does). Each axis
+ * carries a kind - 0 = DCT2 folded butterflies, 1 = identity (scale_w/scale_h),
+ * 2 = matrix product over mat_w/mat_h (DST7/DCT8/DDTX/FDDT) - plus
+ * shift1/shift2 = fwd_tx_shift[tx]. Inert unless AV2_GPU_FWD_TXFM=1.
  */
 int avm_gpu_hook_fwd_txfm(const int16_t *resi, int32_t *coeff, int diff_stride,
-                          int tx_w, int tx_h, int shift1, int shift2,
-                          const int *mat_w, const int *mat_h);
+                          int tx_w, int tx_h, int shift1, int shift2, int kind_w,
+                          int kind_h, int scale_w, int scale_h, int flip_w,
+                          int flip_h, const int *mat_w, const int *mat_h);
 
 #ifdef __cplusplus
 } /* extern "C" */

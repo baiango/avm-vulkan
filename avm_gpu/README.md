@@ -476,12 +476,18 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   compound). The encoder only builds inter-intra masks at slower presets
   (cpu-used 8 turns inter-intra off), which is why that part of the gate uses
   cpu-used 2; the inter-inter compound is built at every preset.
-- The forward transform seam covers DCT_DCT at every size up to 64x64; the
-  64-length axes are box-downsampled exactly as the reference does (the upload
-  bound has to include the extra line the downsample reads - a one-line host
-  bug that only the 64-axis sizes exposed). Every transform type other than
-  DCT_DCT still runs on the CPU, and the 4x4/8x8 `avm_highbd_fdct*` hooks are
-  dead code because nothing in this tree calls those functions. The inter
+- The forward transform seam covers **every primary transform type** at every
+  size up to 64x64: each axis is the 1D kernel `g_hor_tx_type` /
+  `g_ver_tx_type` selects - DCT2 folded butterflies, the identity scaling
+  (scale 128/181/256/362) or a matrix product over the DST7 / DCT8 / DDTX
+  kernel, including the DDT substitution (FDDT is the DDTX matrix read
+  reversed) and the 64-length box downsample. Gated by `avm_gpu_txfm_test` over
+  16 types x 15 sizes x DDT on/off against `fwd_txfm_c()`, and live: 109,325
+  forward transforms on the GPU in the inter gate (was 35,028 with DCT_DCT
+  only), bitstream unchanged. The only thing left on the CPU is a 32-length
+  DST7/DCT8, which the reference asserts against, so the encoder never asks.
+  The 4x4/8x8 `avm_highbd_fdct*` hooks remain dead code because nothing in this
+  tree calls those functions. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.
 - The inter seam's upload window is `last_base_y + 7` rows, which is the exact

@@ -30,6 +30,9 @@
 typedef struct fwd_constants {
   uint32_t w, h, diff_stride, ds_x, ds_y, shift1, shift2, sqrt2, count;
   uint32_t mat_h_off;
+  uint32_t kind_w, kind_h;
+  int32_t scale_w, scale_h;
+  int32_t flip_w, flip_h;
 } fwd_constants;
 
 struct avm_gpu_txfm {
@@ -176,12 +179,21 @@ int avm_gpu_txfm_fdct(avm_gpu_ctx *ctx, avm_gpu_txfm *t,
 
 int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
                      int diff_stride, const avm_gpu_txfm_pos *pos, int n,
-                     int tx_w, int tx_h, int shift1, int shift2,
-                     const int *mat_w, const int *mat_h, int32_t *coeff,
-                     char err[AVM_GPU_ERR_LEN]) {
+                     int tx_w, int tx_h, int shift1, int shift2, int kind_w,
+                     int kind_h, int scale_w, int scale_h, int flip_w,
+                     int flip_h, const int *mat_w, const int *mat_h,
+                     int32_t *coeff, char err[AVM_GPU_ERR_LEN]) {
   if (n <= 0) return 0;
-  if (!resi || !pos || !mat_w || !mat_h || !coeff || diff_stride <= 0) {
+  if (!resi || !pos || !coeff || diff_stride <= 0) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
+    return -1;
+  }
+  if ((kind_w == 2 && !mat_w) || (kind_h == 2 && !mat_h)) {
+    snprintf(err, AVM_GPU_ERR_LEN, "matrix kind needs a kernel");
+    return -1;
+  }
+  if (kind_w < 0 || kind_w > 2 || kind_h < 0 || kind_h > 2) {
+    snprintf(err, AVM_GPU_ERR_LEN, "unsupported 1D kind");
     return -1;
   }
   if (tx_w < 4 || tx_h < 4 || tx_w > 64 || tx_h > 64 || (tx_w & 3) ||
@@ -231,8 +243,9 @@ int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
   memcpy(t->f_resi.mapped, t->f_expand, (size_t)resi_bytes);
   memcpy(t->f_pos.mapped, pos, (size_t)n * sizeof(*pos));
   int32_t *mp = t->f_mat.mapped;
-  memcpy(mp, mat_w, (size_t)(w > h ? w * w : w * w) * 4);
-  memcpy(mp + w * w, mat_h, (size_t)h * h * 4);
+  memset(mp, 0, (size_t)(w * w + h * h) * 4);
+  if (mat_w) memcpy(mp, mat_w, (size_t)w * w * 4);
+  if (mat_h) memcpy(mp + w * w, mat_h, (size_t)h * h * 4);
 
   const avm_gpu_buf bufs[4] = { t->f_resi, t->f_coef, t->f_pos, t->f_mat };
   const int log2w = tx_w == 64 ? 6 : (tx_w == 32 ? 5 : (tx_w == 16 ? 4 : (tx_w == 8 ? 3 : 2)));
@@ -241,7 +254,10 @@ int avm_gpu_txfm_fwd(avm_gpu_ctx *ctx, avm_gpu_txfm *t, const int16_t *resi,
                        (uint32_t)diff_stride, (uint32_t)ds_x,
                        (uint32_t)ds_y,     (uint32_t)shift1,
                        (uint32_t)shift2,   (uint32_t)((log2w + log2h) & 1),
-                       (uint32_t)n,        (uint32_t)(w * w) };
+                       (uint32_t)n,        (uint32_t)(w * w),
+                       (uint32_t)kind_w,   (uint32_t)kind_h,
+                       scale_w,            scale_h,
+                       flip_w,             flip_h };
   const uint32_t groups = (uint32_t)((n + 31) / 32);
   const int rc = avm_gpu_pipeline_dispatch(ctx, t->fwd_pipe, bufs, 4, &pc,
                                            sizeof(pc), groups, err);
