@@ -36,7 +36,7 @@
 typedef struct cwp_constants {
   uint32_t src_stride, conv_stride, dst_stride, w, h, bd, x0, y0, sx, sy;
   uint32_t round0, round1, do_average, uneven, fwd, bck, conv_index, mode;
-  uint32_t sb, x_step, y_step;
+  uint32_t sb, x_step, y_step, packed;
 } cwp_constants;
 
 struct avm_gpu_inter {
@@ -63,7 +63,13 @@ typedef struct push_constants {
       sr, round0, round1, fvo, sb;
   uint32_t compound, do_average, conv_stride, uneven;
   int32_t fwd, bck;
+  uint32_t packed;
 } push_constants;
+
+/* Reference planes are uploaded as two little-endian 16-bit samples per word
+ * whenever the row stride is even (which maps every row onto whole words),
+ * halving the bytes; an odd stride keeps the one-sample-per-word layout. */
+static int pack16_for(int stride) { return (stride % 2) == 0; }
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
                       VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
@@ -173,7 +179,8 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   }
 
   const size_t pixels = (size_t)src_stride * (size_t)src_rows;
-  if (pixels > in->expand_cap) {
+  const int packed = pack16_for(src_stride);
+  if (!packed && pixels > in->expand_cap) {
     free(in->expand);
     in->expand = malloc(pixels * sizeof(*in->expand));
     in->expand_cap = in->expand ? pixels : 0;
@@ -182,7 +189,9 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
       return -1;
     }
   }
-  for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
+  if (!packed) {
+    for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
+  }
 
   const int filt_entries = filter_y ? 2 * INTER_FILTER_ENTRIES : INTER_FILTER_ENTRIES;
   /* The shader always declares the conv binding, so a single-reference call
@@ -190,7 +199,8 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
    * the sr path came back with garbage on MoltenVK (zeros and clips in some
    * columns), while 64x64 works for every sr and scaled case. */
   const size_t conv_n = conv ? (size_t)conv_stride * (size_t)h : 64 * 64;
-  if (ensure_buf(ctx, &in->src, &in->src_cap, (VkDeviceSize)pixels * 4, err) ||
+  if (ensure_buf(ctx, &in->src, &in->src_cap,
+                 (VkDeviceSize)pixels * (packed ? 2 : 4), err) ||
       ensure_buf(ctx, &in->filt, &in->filt_cap,
                  (VkDeviceSize)filt_entries * 4, err) ||
       ensure_buf(ctx, &in->dst, &in->dst_cap,
@@ -198,7 +208,11 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
       ensure_buf(ctx, &in->conv, &in->conv_cap, (VkDeviceSize)conv_n * 4, err)) {
     return -1;
   }
-  memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+  if (packed) {
+    memcpy(in->src.mapped, src, (size_t)pixels * 2);
+  } else {
+    memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+  }
   uint32_t *fp = in->filt.mapped;
   for (int i = 0; i < INTER_FILTER_ENTRIES; i++) fp[i] = (uint32_t)filter[i];
   if (filter_y) {
@@ -234,7 +248,8 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                         (uint32_t)conv_stride,
                         (uint32_t)(uneven ? 1 : 0),
                         fwd,
-                        bck };
+                        bck,
+                        (uint32_t)packed };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 4, &pc,
@@ -490,7 +505,8 @@ int avm_gpu_inter_cwp_convolve(
   }
 
   const size_t pixels = (size_t)src_stride * (size_t)src_rows;
-  if (pixels > in->expand_cap) {
+  const int packed = pack16_for(src_stride);
+  if (!packed && pixels > in->expand_cap) {
     free(in->expand);
     in->expand = malloc(pixels * sizeof(*in->expand));
     in->expand_cap = in->expand ? pixels : 0;
@@ -499,11 +515,14 @@ int avm_gpu_inter_cwp_convolve(
       return -1;
     }
   }
-  for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
+  if (!packed) {
+    for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
+  }
 
   const size_t conv_n = (size_t)conv_stride * (size_t)h;
   const size_t dst_n = (size_t)dst_stride * (size_t)h;
-  if (ensure_buf(ctx, &in->src, &in->src_cap, (VkDeviceSize)pixels * 4, err) ||
+  if (ensure_buf(ctx, &in->src, &in->src_cap,
+                 (VkDeviceSize)pixels * (packed ? 2 : 4), err) ||
       ensure_buf(ctx, &in->filt, &in->filt_cap,
                  (VkDeviceSize)(2 * INTER_FILTER_ENTRIES) * 4, err) ||
       ensure_buf(ctx, &in->cwpconv_conv, &in->cwpconv_conv_cap,
@@ -512,7 +531,11 @@ int avm_gpu_inter_cwp_convolve(
                  (VkDeviceSize)dst_n * 4, err)) {
     return -1;
   }
-  memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+  if (packed) {
+    memcpy(in->src.mapped, src, (size_t)pixels * 2);
+  } else {
+    memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+  }
   int *fp = in->filt.mapped;
   for (int i = 0; i < INTER_FILTER_ENTRIES; i++) {
     fp[i] = (int)filter_x[i];
@@ -548,7 +571,8 @@ int avm_gpu_inter_cwp_convolve(
                                                 : (subpel_y_qn == 0 ? 1 : 0))),
                        (uint32_t)sb,
                        (uint32_t)x_step,
-                       (uint32_t)y_step };
+                       (uint32_t)y_step,
+                       (uint32_t)packed };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwpconv_pipe, bufs, 4,

@@ -39,7 +39,16 @@ layout(push_constant) uniform PC {
   uint uneven;      // weighted average with fwd/bck (else (a + b) >> 1)
   int fwd;
   int bck;
+  uint packed;      // 1 = two 16-bit reference samples per word (else one)
 } pc;
+
+// Packed layout: two little-endian 16-bit samples per 32-bit word, so the
+// reference plane is uploaded at half the bytes.
+uint samp(const uint i) {
+  if (pc.packed == 0u) return s[i];
+  const uint w = s[i >> 1u];
+  return (w >> ((i & 1u) * 16u)) & 0xffffu;
+}
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
 
@@ -74,7 +83,7 @@ void main() {
     int sum = sr != 0 ? hbias : 0;
     for (int kx = 0; kx < 8; ++kx) {
       const int col = sxp + base_x + kx - 3;
-      sum += f[fh + kx] * int(s[row * ss + col]);
+      sum += f[fh + kx] * int(samp(uint(row * ss + col)));
     }
     // convolve8 clips between the passes; the sr path keeps a 16-bit
     // intermediate and rounds by round_0 instead.

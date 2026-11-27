@@ -434,10 +434,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the stats line's "warped C" is 0 for every gate stream (5,349 warps at
   cpu-used 8, 89,656 at cpu-used 2, 28,900 in the 16:9 stream, with the
   compound counts 320 / 3,456 / 1,694).
-- Data model: packed 16-bit storage covers SAD, variance and the forward DCT;
-  the inverse transform, intra, inter, warp and the filters still widen to
-  32-bit words. A device-local arena exists for SAD and variance, but the
-  remaining modules use host-visible buffers and re-upload per call.
+- Data model: packed 16-bit storage covers SAD, variance, the forward DCT and
+  now the inter seam - `inter.comp`, `cwpconv.comp` and the three warp kernels
+  read two little-endian 16-bit reference samples per 32-bit word whenever the
+  row stride is even, so a reference plane is uploaded at half the bytes (an odd
+  stride keeps the one-sample-per-word layout). Outputs (pixels, the compound
+  buffer) stay one sample per word, since two invocations can share a word.
+  Measured: a 3,520-sample window uploads as 7,040 bytes instead of 14,080.
+  The inverse transform, intra and the filters still widen to 32-bit words. A
+  device-local arena exists for SAD and variance, but the remaining modules use
+  host-visible buffers and re-upload per call.
 - Scaled compound is live. The SIGBUS that blocked it was a reproducer bug -
   it passed `scaled=0` together with a 1/1024 step (910), so the seam's window
   arithmetic (`(h-1)*step >> 4`) produced a 3592-row window and read outside the

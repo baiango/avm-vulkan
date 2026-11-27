@@ -47,7 +47,15 @@ layout(push_constant) uniform PC {
   uint uneven;
   int fwd;
   int bck;
+  uint packed;      // 1 = two 16-bit reference samples per word (else one)
 } pc;
+
+// Packed layout: two little-endian 16-bit samples per 32-bit word.
+uint samp(const uint i) {
+  if (pc.packed == 0u) return ref_px[i];
+  const uint w = ref_px[i >> 1u];
+  return (w >> ((i & 1u) * 16u)) & 0xffffu;
+}
 
 const int FILTER_BITS = 7;
 const int WARPEDMODEL_PREC_BITS = 16;
@@ -145,7 +153,7 @@ void main() {
       int sum = 1 << offset_bits_horiz;
       for (int m = 0; m < 8; ++m) {
         const int sample_x = clampi(ix + m, 0, width - 1);
-        sum += int(ref_px[uint(iy * stride + sample_x)]) * wf[offs * 8 + m];
+        sum += int(samp(uint(iy * stride + sample_x))) * wf[offs * 8 + m];
       }
       tmp[(k + 7) * 8 + (l + 4)] = (sum + (1 << (reduce_bits_horiz - 1))) >>
                                    reduce_bits_horiz;

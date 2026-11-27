@@ -50,6 +50,7 @@ typedef struct push_constants {
   uint32_t ss_x, ss_y;
   uint32_t round_1, compound, do_average, conv_stride, uneven;
   int32_t fwd, bck;
+  uint32_t packed;
 } push_constants;
 
 /* Compound prediction state shared by the three warp kernels (the public
@@ -103,13 +104,13 @@ int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_WARP_EXT_SPV_PATH,
-                              "AVM_GPU_WARP_EXT_SPV", 5, 26 * 4, &w->ext_pipe,
+                              "AVM_GPU_WARP_EXT_SPV", 5, 27 * 4, &w->ext_pipe,
                               err) != 0) {
     avm_gpu_warp_destroy(ctx, w);
     return -1;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_WARP_SCALED_SPV_PATH,
-                              "AVM_GPU_WARP_SCALED_SPV", 5, 29 * 4,
+                              "AVM_GPU_WARP_SCALED_SPV", 5, 30 * 4,
                               &w->scaled_pipe, err) != 0) {
     avm_gpu_warp_destroy(ctx, w);
     return -1;
@@ -157,7 +158,8 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
 
   const size_t ref_n = (size_t)stride * height;
   const size_t pred_n = (size_t)p_stride * (p_row + p_height);
-  if (ref_n > w->expand_cap) {
+  const int packed = (stride % 2) == 0;
+  if (!packed && ref_n > w->expand_cap) {
     free(w->expand);
     w->expand = malloc(ref_n * sizeof(*w->expand));
     w->expand_cap = w->expand ? ref_n : 0;
@@ -167,9 +169,10 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
 
-  if (w->ref_cap < (VkDeviceSize)ref_n * 4) {
+  const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
+  if (w->ref_cap < ref_bytes) {
     avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)ref_n * 4, &w->ref, err) != 0) {
+    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
       return -1;
     }
     w->ref_cap = w->ref.size;
@@ -194,8 +197,12 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
 
-  for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-  memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  if (packed) {
+    memcpy(w->ref.mapped, ref, ref_n * 2);
+  } else {
+    for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
+    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  }
   uint32_t *pp = w->pred.mapped;
   for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
   int32_t *fp = w->filt.mapped;
@@ -231,7 +238,8 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                         (uint32_t)(cmp ? cmp->conv_stride : 0),
                         (uint32_t)(cmp && cmp->uneven),
                         cmp ? cmp->fwd : 0,
-                        cmp ? cmp->bck : 0 };
+                        cmp ? cmp->bck : 0,
+                        (uint32_t)packed };
   const uint32_t gx = (uint32_t)((p_width + 7) / 8);
   const uint32_t gy = (uint32_t)((p_height + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->pipe, bufs, 4, &pc,
@@ -251,6 +259,7 @@ typedef struct ext_push_constants {
   uint32_t round_1, compound, do_average, conv_stride, uneven;
   int32_t fwd, bck;
   uint32_t use_box;
+  uint32_t packed;
 } ext_push_constants;
 
 int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
@@ -273,7 +282,8 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
 
   const size_t ref_n = (size_t)stride * height;
   const size_t pred_n = (size_t)p_stride * (p_row + p_height);
-  if (ref_n > w->expand_cap) {
+  const int packed = (stride % 2) == 0;
+  if (!packed && ref_n > w->expand_cap) {
     free(w->expand);
     w->expand = malloc(ref_n * sizeof(*w->expand));
     w->expand_cap = w->expand ? ref_n : 0;
@@ -282,9 +292,10 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
       return -1;
     }
   }
-  if (w->ref_cap < (VkDeviceSize)ref_n * 4) {
+  const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
+  if (w->ref_cap < ref_bytes) {
     avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)ref_n * 4, &w->ref, err) != 0) {
+    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
       return -1;
     }
     w->ref_cap = w->ref.size;
@@ -303,8 +314,12 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
 
-  for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-  memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  if (packed) {
+    memcpy(w->ref.mapped, ref, ref_n * 2);
+  } else {
+    for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
+    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  }
   uint32_t *pp = w->pred.mapped;
   for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
   int32_t *fp = w->ext_filt.mapped;
@@ -351,7 +366,8 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                             (uint32_t)(cmp && cmp->uneven),
                             cmp ? cmp->fwd : 0,
                             cmp ? cmp->bck : 0,
-                            (uint32_t)(use_box ? 1 : 0) };
+                            (uint32_t)(use_box ? 1 : 0),
+                            (uint32_t)packed };
   const uint32_t gx = (uint32_t)((p_width + 3) / 4);
   const uint32_t gy = (uint32_t)((p_height + 3) / 4);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, w->ext_pipe, bufs, 5, &pc,
@@ -371,6 +387,7 @@ typedef struct scaled_push_constants {
   int32_t x_scale_fp, y_scale_fp, x_step_qn, y_step_qn;
   uint32_t round_1, compound, do_average, conv_stride, uneven;
   int32_t fwd, bck;
+  uint32_t packed;
 } scaled_push_constants;
 
 /* SCALE_SUBPEL_BITS: the scale factors' 1/16 steps carry into 16-bit sub-pel
@@ -413,7 +430,8 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
 
   const size_t ref_n = (size_t)stride * height;
   const size_t pred_n = (size_t)p_stride * (p_row + p_height);
-  if (ref_n > w->expand_cap) {
+  const int packed = (stride % 2) == 0;
+  if (!packed && ref_n > w->expand_cap) {
     free(w->expand);
     w->expand = malloc(ref_n * sizeof(*w->expand));
     w->expand_cap = w->expand ? ref_n : 0;
@@ -422,9 +440,10 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
       return -1;
     }
   }
-  if (w->ref_cap < (VkDeviceSize)ref_n * 4) {
+  const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
+  if (w->ref_cap < ref_bytes) {
     avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)ref_n * 4, &w->ref, err) != 0) {
+    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
       return -1;
     }
     w->ref_cap = w->ref.size;
@@ -450,8 +469,12 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
 
-  for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-  memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  if (packed) {
+    memcpy(w->ref.mapped, ref, ref_n * 2);
+  } else {
+    for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
+    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+  }
   uint32_t *pp = w->pred.mapped;
   for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
   int32_t *fp = w->ext_filt.mapped;
@@ -490,7 +513,8 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     (uint32_t)(cmp ? cmp->conv_stride : 0),
     (uint32_t)(cmp && cmp->uneven),
     cmp ? cmp->fwd : 0,
-    cmp ? cmp->bck : 0
+    cmp ? cmp->bck : 0,
+    (uint32_t)packed
   };
   const uint32_t gx = (uint32_t)((p_width + 3) / 4);
   const uint32_t gy = (uint32_t)((p_height + 3) / 4);
