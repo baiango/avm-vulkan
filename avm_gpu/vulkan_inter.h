@@ -44,6 +44,22 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *inter);
  * Compound prediction: A64 mask blend of two predictors, matching
  * avm_highbd_blend_a64_mask_c() (mask subsampling subw/subh included).
  */
+/*
+ * av2_highbd_convolve_2d_sr_c() for one reference, unscaled: filter_x and
+ * filter_y are the 16 x 8-tap kernel tables (the row at the subpel position is
+ * used), round0/round1 come
+ * from the ConvolveParams of the call (ROUND0_BITS and 2*FILTER_BITS-round_0
+ * for a single reference), and the intermediate is 16-bit without a clip.
+ * src must point at the block origin with 3 samples of border on each side.
+ */
+int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                              const uint16_t *src, int src_stride, int src_rows,
+                              int sx, int sy, const int16_t *filter_x,
+                              const int16_t *filter_y, int subpel_x_qn,
+                              int subpel_y_qn, int w, int h, int bd, int round0,
+                              int round1, uint16_t *dst, int dst_stride,
+                              char err[AVM_GPU_ERR_LEN]);
+
 int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *inter,
                             const uint16_t *src0, int s0_stride,
                             const uint16_t *src1, int s1_stride,

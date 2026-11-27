@@ -48,7 +48,7 @@ struct avm_gpu_inter {
 
 typedef struct push_constants {
   uint32_t src_stride, dst_stride, sx, sy, w, h, bd, x0, y0, x_step, y_step,
-      pad;
+      sr, round0, round1, fvo;
 } push_constants;
 
 static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
@@ -109,13 +109,13 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   free(in);
 }
 
-int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
-                                  const uint16_t *src, int src_stride,
-                                  int src_rows, int sx, int sy,
-                                  const int16_t *filter, int x0_q4,
-                                  int y0_q4, int x_step_q4, int y_step_q4,
-                                  int w, int h, int bd, uint16_t *dst,
-                                  int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                         const uint16_t *src, int src_stride, int src_rows,
+                         int sx, int sy, const int16_t *filter, int x0_q4,
+                         int y0_q4, int x_step_q4, int y_step_q4, int w, int h,
+                         int bd, uint16_t *dst, int dst_stride, int sr,
+                         int round0, int round1, const int16_t *filter_y,
+                         char err[AVM_GPU_ERR_LEN]) {
   if (!src || !filter || !dst) {
     snprintf(err, AVM_GPU_ERR_LEN, "invalid arguments");
     return -1;
@@ -158,9 +158,10 @@ int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   }
   for (size_t i = 0; i < pixels; i++) in->expand[i] = src[i];
 
+  const int filt_entries = filter_y ? 2 * INTER_FILTER_ENTRIES : INTER_FILTER_ENTRIES;
   if (ensure_buf(ctx, &in->src, &in->src_cap, (VkDeviceSize)pixels * 4, err) ||
       ensure_buf(ctx, &in->filt, &in->filt_cap,
-                 (VkDeviceSize)INTER_FILTER_ENTRIES * 4, err) ||
+                 (VkDeviceSize)filt_entries * 4, err) ||
       ensure_buf(ctx, &in->dst, &in->dst_cap,
                  (VkDeviceSize)dst_stride * h * 4, err)) {
     return -1;
@@ -168,6 +169,11 @@ int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
   uint32_t *fp = in->filt.mapped;
   for (int i = 0; i < INTER_FILTER_ENTRIES; i++) fp[i] = (uint32_t)filter[i];
+  if (filter_y) {
+    for (int i = 0; i < INTER_FILTER_ENTRIES; i++) {
+      fp[INTER_FILTER_ENTRIES + i] = (uint32_t)filter_y[i];
+    }
+  }
   memset(in->dst.mapped, 0, (size_t)dst_stride * h * 4);
 
   const avm_gpu_buf bufs[3] = { in->src, in->filt, in->dst };
@@ -182,7 +188,10 @@ int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                         (uint32_t)y0_q4,
                         (uint32_t)x_step_q4,
                         (uint32_t)y_step_q4,
-                        0 };
+                        (uint32_t)sr,
+                        (uint32_t)round0,
+                        (uint32_t)round1,
+                        (uint32_t)(filter_y ? INTER_FILTER_ENTRIES : 0) };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->pipe, bufs, 3, &pc,
@@ -323,4 +332,30 @@ int avm_gpu_inter_cwp(avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *pred,
     }
   }
   return 0;
+}
+
+int avm_gpu_inter_convolve_scaled(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                                  const uint16_t *src, int src_stride,
+                                  int src_rows, int sx, int sy,
+                                  const int16_t *filter, int x0_q4,
+                                  int y0_q4, int x_step_q4, int y_step_q4,
+                                  int w, int h, int bd, uint16_t *dst,
+                                  int dst_stride, char err[AVM_GPU_ERR_LEN]) {
+  return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter, x0_q4,
+                       y0_q4, x_step_q4, y_step_q4, w, h, bd, dst, dst_stride, 0,
+                       0, 0, NULL, err);
+}
+
+int avm_gpu_inter_convolve_sr(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                              const uint16_t *src, int src_stride, int src_rows,
+                              int sx, int sy, const int16_t *filter_x,
+                              const int16_t *filter_y, int subpel_x_qn,
+                              int subpel_y_qn, int w, int h, int bd, int round0,
+                              int round1, uint16_t *dst, int dst_stride,
+                              char err[AVM_GPU_ERR_LEN]) {
+  /* av2_highbd_convolve_2d_sr_c() for an unscaled reference: steps are 16 and
+   * the intermediate is 16-bit without the inter-pass clip. */
+  return convolve_impl(ctx, in, src, src_stride, src_rows, sx, sy, filter_x,
+                       subpel_x_qn, subpel_y_qn, 16, 16, w, h, bd, dst,
+                       dst_stride, 1, round0, round1, filter_y, err);
 }

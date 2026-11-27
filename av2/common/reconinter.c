@@ -29,6 +29,10 @@
 #include "av2/common/mvref_common.h"
 #include "av2/common/mv.h"
 #include "av2/common/reconinter.h"
+
+#if defined(AVM_GPU_HOOKS)
+#include "avm_gpu/vulkan_hook_inter.h"
+#endif
 #include "av2/common/reconintra.h"
 #include "av2/common/tip.h"
 
@@ -150,6 +154,30 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
         inter_pred_params->scale_factors, inter_pred_params->use_warp_bd_box,
         inter_pred_params->warp_bd_box);
   } else if (inter_pred_params->mode == TRANSLATION_PRED) {
+#if defined(AVM_GPU_HOOKS)
+    // Optional Vulkan path (avm_gpu/): single reference, unscaled, 8-tap.
+    // Returns 0 and falls through to the RTCD convolve otherwise.
+    if (!inter_pred_params->conv_params.is_compound &&
+        !inter_pred_params->is_intrabc && inter_pred_params->interp_filter_params[0] &&
+        inter_pred_params->interp_filter_params[1]) {
+      SubpelParams sp = *subpel_params;
+      revert_scale_extra_bits(&sp);
+      if (sp.xs == SUBPEL_SHIFTS && sp.ys == SUBPEL_SHIFTS &&
+          avm_gpu_hook_inter(src, src_stride, dst, dst_stride,
+                             inter_pred_params->block_width,
+                             inter_pred_params->block_height,
+                             inter_pred_params->bit_depth,
+                             inter_pred_params->interp_filter_params[0]->filter_ptr,
+                             inter_pred_params->interp_filter_params[1]->filter_ptr,
+                             inter_pred_params->interp_filter_params[0]->taps,
+                             inter_pred_params->interp_filter_params[1]->taps,
+                             sp.subpel_x, sp.subpel_y,
+                             inter_pred_params->conv_params.round_0,
+                             inter_pred_params->conv_params.round_1)) {
+        return;
+      }
+    }
+#endif
     highbd_inter_predictor(
         src, src_stride, dst, dst_stride, subpel_params,
         inter_pred_params->block_width, inter_pred_params->block_height,

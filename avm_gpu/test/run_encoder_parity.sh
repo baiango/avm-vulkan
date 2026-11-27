@@ -99,6 +99,39 @@ if [ -z "$tcalls" ] || [ "$tcalls" -le 0 ]; then
   exit 1
 fi
 
+# Third call site: single-reference subpel inter prediction, on a clip whose
+# content moves by a fractional pixel so the subpel filter (not the integer
+# copy path) is what the skin prices.
+python3 "$here/make_motion_clip.py" "$work/motion.y4m"
+INTER_ARGS="--limit=5 --good --cpu-used=8 --passes=1 --threads=1"
+if ! "$AVMENC" $INTER_ARGS -o "$work/motion_cpu.ivf" "$work/motion.y4m" \
+    >"$work/motion_cpu.log" 2>&1; then
+  echo "FAIL: CPU motion-clip encode failed"
+  tail -20 "$work/motion_cpu.log"
+  exit 1
+fi
+if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $INTER_ARGS \
+    -o "$work/motion_gpu.ivf" "$work/motion.y4m" >"$work/inter.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/inter.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU inter encode failed"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+if ! grep -q "inter hook enabled" "$work/inter.log"; then
+  echo "FAIL: the Vulkan inter hook did not initialise"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+icalls=$(sed -n 's/.*avm_gpu: \([0-9][0-9]*\) inter prediction blocks.*/\1/p' "$work/inter.log")
+if [ -z "$icalls" ] || [ "$icalls" -le 0 ]; then
+  echo "FAIL: the GPU inter path predicted no blocks"
+  tail -20 "$work/inter.log"
+  exit 1
+fi
+
 hash_of() {
   if command -v md5sum >/dev/null 2>&1; then
     md5sum "$1" | cut -d' ' -f1
@@ -116,6 +149,10 @@ echo "gpu SAD blocks : $calls in $dispatches dispatches"
 echo "cpu bitstream  : $cpu_size bytes, md5 $cpu_hash"
 echo "gpu bitstream  : $gpu_size bytes, md5 $gpu_hash"
 
+inter_cpu_hash=$(hash_of "$work/motion_cpu.ivf")
+inter_hash=$(hash_of "$work/motion_gpu.ivf")
+echo "inter bitstream: $(wc -c <"$work/motion_gpu.ivf" | tr -d ' ') bytes, md5 $inter_hash ($icalls inter blocks)"
+
 var_hash=$(hash_of "$work/var.ivf")
 echo "var bitstream  : $(wc -c <"$work/var.ivf" | tr -d ' ') bytes, md5 $var_hash ($tcalls variance blocks)"
 
@@ -127,5 +164,9 @@ if [ "$cpu_hash" != "$var_hash" ]; then
   echo "FAIL: variance bitstreams differ"
   exit 1
 fi
+if [ "$inter_cpu_hash" != "$inter_hash" ]; then
+  echo "FAIL: inter bitstreams differ ($inter_cpu_hash vs $inter_hash)"
+  exit 1
+fi
 
-echo "PASS: bit-identical bitstream with the Vulkan SAD path and with the Vulkan variance path"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance and inter paths"

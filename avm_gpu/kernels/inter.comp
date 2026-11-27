@@ -26,7 +26,10 @@ layout(push_constant) uniform PC {
   uint y0;      // vertical subpel position, 0..15
   uint x_step;  // 16 for an unscaled reference
   uint y_step;
-  uint pad;
+  uint sr;      // 1 = av2_highbd_convolve_2d_sr_c() rounding
+  uint round0;
+  uint round1;
+  uint fvo;     // offset of the vertical filter table in units of 8 taps
 } pc;
 
 int clipval(int v, int maxv) { return v < 0 ? 0 : (v > maxv ? maxv : v); }
@@ -46,20 +49,43 @@ void main() {
   const int base_x = xq >> 4;
   const int base_y = yq >> 4;
   const int fh = (xq & 15) * 8;
-  const int fv = (yq & 15) * 8;
+  const int fv = int(pc.fvo) + (yq & 15) * 8;
+
+  const int sr = int(pc.sr);
+  const int r0 = int(pc.round0);
+  const int r1 = int(pc.round1);
+  const int hbias = 1 << (int(pc.bd) + 6);          // single-ref sr path
+  const int vbias = 1 << (int(pc.bd) + 14 - r0);
 
   int temp[8];
   for (int ky = 0; ky < 8; ++ky) {
     const int row = syp + base_y + ky - 3;
-    int sum = 0;
+    int sum = sr != 0 ? hbias : 0;
     for (int kx = 0; kx < 8; ++kx) {
       const int col = sxp + base_x + kx - 3;
       sum += f[fh + kx] * int(s[row * ss + col]);
     }
-    temp[ky] = clipval((sum + 64) >> 7, maxv);
+    // convolve8 clips between the passes; the sr path keeps a 16-bit
+    // intermediate and rounds by round_0 instead.
+    temp[ky] = sr != 0 ? (sum + (1 << (r0 - 1))) >> r0
+                       : clipval((sum + 64) >> 7, maxv);
   }
 
-  int vsum = 0;
+  int vsum = sr != 0 ? vbias : 0;
   for (int ky = 0; ky < 8; ++ky) vsum += f[fv + ky] * temp[ky];
-  d[y * ds + x] = uint(clipval((vsum + 64) >> 7, maxv));
+  if (sr == 0) {
+    d[y * ds + x] = uint(clipval((vsum + 64) >> 7, maxv));
+    return;
+  }
+  // av2_highbd_convolve_2d_sr_c(): round by round_1, subtract the bias the
+  // two rounded passes injected, then round by the remaining bits.
+  int res = ((vsum + (1 << (r1 - 1))) >> r1) -
+            ((1 << (int(pc.bd) + 14 - r0 - r1)) +
+             (1 << (int(pc.bd) + 13 - r0 - r1)));
+  const int bits = 14 - r0 - r1;
+  if (bits > 0) {
+    const int rb = 1 << (bits - 1);
+    res = res < 0 ? -((-res + rb) >> bits) : ((res + rb) >> bits);
+  }
+  d[y * ds + x] = uint(clipval(res, maxv));
 }

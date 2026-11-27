@@ -1,0 +1,47 @@
+/*
+ * Copyright (c) 2021, Alliance for Open Media. All rights reserved
+ *
+ * This source code is subject to the terms of the BSD 3-Clause Clear License
+ * and the Alliance for Open Media Patent License 1.0. If the BSD 3-Clause Clear
+ * License was not distributed with this source code in the LICENSE file, you
+ * can obtain it at aomedia.org/license/software-license/bsd-3-c-c/.  If the
+ * Alliance for Open Media Patent License 1.0 was not distributed with this
+ * source code in the PATENTS file, you can obtain it at
+ * aomedia.org/license/patent-license/.
+ */
+
+#ifndef AVM_AVM_GPU_VULKAN_HOOK_INTER_H_
+#define AVM_AVM_GPU_VULKAN_HOOK_INTER_H_
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * Inter prediction seam for single-reference, unscaled subpel prediction.
+ *
+ * Called from av2/common/reconinter.c::av2_make_inter_predictor() when the
+ * library is built with AVM_GPU_HOOKS, before the RTCD convolve facade. It
+ * handles only what the kernel models bit-exactly - one reference, no scaling,
+ * 8-tap x and y filters, no intrabc, blocks up to 64x64 - and returns 0 for
+ * everything else so the caller runs the C path.
+ *
+ * src points at the block origin and must have 3 samples of border on every
+ * side; filter_x / filter_y are the 16 x 8-tap kernel tables.
+ *
+ * Inert unless AV2_GPU_INTER=1. AV2_GPU_INTER_STATS=1 prints the number of
+ * blocks predicted on the GPU at exit.
+ */
+int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
+                       int dst_stride, int w, int h, int bd,
+                       const int16_t *filter_x, const int16_t *filter_y,
+                       int taps_x, int taps_y, int subpel_x_qn,
+                       int subpel_y_qn, int round_0, int round_1);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif  // AVM_AVM_GPU_VULKAN_HOOK_INTER_H_

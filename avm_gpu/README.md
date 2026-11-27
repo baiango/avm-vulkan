@@ -137,10 +137,12 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_lr_hook_test.c` | seam gate: procunit-sized stripes (64/32/partial) against `apply_pc_wiener_highbd()` |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
+| `vulkan_hook_inter.{h,c}` | inter prediction seam: single reference, unscaled, 8-tap subpel, `avm_gpu_hook_inter()` |
 | `vulkan_hook_lr.{h,c}` | loop-restoration seam: `avm_gpu_hook_pcwiener()` runs one procunit through the classifier + filter kernels, with the lossless per-block copy mask |
 | `test/avm_gpu_var_hook_test.c` | gate for the variance seam: memo hit path + every block size against the reference loop |
 | `test/run_encoder_parity.sh` | end-to-end gate: CPU vs Vulkan encode, md5 must match |
 | `test/make_test_clip.py` | deterministic 3-frame 64x64 4:2:0 clip for that gate |
+| `test/make_motion_clip.py` | 5-frame clip whose content moves by half a pixel per frame, so the inter gate exercises the subpel filter rather than the integer copy path |
 
 ## Data model
 
@@ -358,6 +360,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - [x] PC-Wiener classification stage + end-to-end gate (class ids and the
       restored plane against `apply_pc_wiener_highbd()`, 2 bitdepths x
       tx-skip on/off)
+- [x] inter prediction call site: `av2_make_inter_predictor()` runs the subpel
+      kernel when `AV2_GPU_INTER=1` (single reference, unscaled, 8-tap), with
+      the encoder bitstream gate on a half-pel motion clip
 - [x] loop-restoration call site: `pc_wiener_stripe_highbd()` runs the kernels
       when `AV2_GPU_LR=1`, gated by `avm_gpu_lr_hook_test` (6 procunit shapes x
       2 bitdepths x tx-skip on/off)
@@ -377,7 +382,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   the inverse transform, intra, inter, warp and the filters still widen to
   32-bit words. A device-local arena exists for SAD and variance, but the
   remaining modules use host-visible buffers and re-upload per call.
-- Kernel families still missing: the forward DCT only covers 4x4/8x8.
+- Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
+  seam covers single-reference unscaled 8-tap prediction; compound, scaled,
+  warped and >8-tap encoder-side filters still run on the CPU.
 - Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
   which serves both the encoder and the decoder) and the seam is gated, but no
   end-to-end stream gate exists yet: with the settings in this repo the encoder

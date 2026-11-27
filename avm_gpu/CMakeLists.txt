@@ -198,7 +198,8 @@ add_library(
   "${CMAKE_CURRENT_SOURCE_DIR}/pcwiener.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_var.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_lr.c")
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_lr.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hook_inter.c")
 target_include_directories(avm_gpu PUBLIC "${AVM_ROOT}")
 target_compile_definitions(avm_gpu
                            PRIVATE AVM_GPU_SAD_SPV_PATH="${AVM_GPU_SAD_SPV}"
