@@ -24,9 +24,12 @@ extern "C" {
  *
  * Called from av2/common/reconinter.c::av2_make_inter_predictor() when the
  * library is built with AVM_GPU_HOOKS, before the RTCD convolve facade. It
- * handles only what the kernel models bit-exactly - one reference, no scaling,
- * 8-tap x and y filters, no intrabc, blocks up to 64x64 - and returns 0 for
- * everything else so the caller runs the C path.
+ * handles what the kernels model bit-exactly - one reference, scaled or
+ * unscaled, 8-tap x and y filters, no intrabc, blocks up to 64x64 - and
+ * returns 0 for everything else so the caller runs the C path. Positions and
+ * steps follow the caller's convention: 1/16 units after
+ * revert_scale_extra_bits() for an unscaled reference, 1/1024
+ * (SCALE_SUBPEL_BITS) for a scaled one.
  *
  * src points at the block origin and must have 3 samples of border on every
  * side; filter_x / filter_y are the 16 x 8-tap kernel tables.
@@ -38,7 +41,8 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                        int dst_stride, int w, int h, int bd,
                        const int16_t *filter_x, const int16_t *filter_y,
                        int taps_x, int taps_y, int subpel_x_qn,
-                       int subpel_y_qn, int round_0, int round_1);
+                       int subpel_y_qn, int round_0, int round_1, int scaled,
+                       int x_step_qn, int y_step_qn);
 
 #ifdef __cplusplus
 } /* extern "C" */

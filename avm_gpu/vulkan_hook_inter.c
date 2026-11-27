@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_dsp/avm_filter.h"
 #include "avm_gpu/vulkan_gpu.h"
 #include "avm_gpu/vulkan_inter.h"
 
@@ -70,12 +71,19 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
                        int dst_stride, int w, int h, int bd,
                        const int16_t *filter_x, const int16_t *filter_y,
                        int taps_x, int taps_y, int subpel_x_qn,
-                       int subpel_y_qn, int round_0, int round_1) {
+                       int subpel_y_qn, int round_0, int round_1, int scaled,
+                       int x_step_qn, int y_step_qn) {
   if (!src || !dst || !filter_x || !filter_y) return 0;
   if (w <= 0 || h <= 0 || w > HOOK_MAX_DIM || h > HOOK_MAX_DIM) return 0;
   if (taps_x != HOOK_SUBPEL_TAPS || taps_y != HOOK_SUBPEL_TAPS) return 0;
-  if (subpel_x_qn < 0 || subpel_x_qn > 15 || subpel_y_qn < 0 ||
-      subpel_y_qn > 15) {
+  const int subpel_max = scaled ? SCALE_SUBPEL_MASK : 15;
+  if (subpel_x_qn < 0 || subpel_x_qn > subpel_max || subpel_y_qn < 0 ||
+      subpel_y_qn > subpel_max) {
+    return 0;
+  }
+  if (scaled && (x_step_qn <= 0 || y_step_qn <= 0 ||
+                 x_step_qn > SCALE_SUBPEL_SHIFTS ||
+                 y_step_qn > SCALE_SUBPEL_SHIFTS)) {
     return 0;
   }
   if (src_stride < w + 2 * HOOK_BORDER || dst_stride < w) return 0;
@@ -84,14 +92,29 @@ int avm_gpu_hook_inter(const uint16_t *src, int src_stride, uint16_t *dst,
   int handled = 0;
   if (hook_ready_locked()) {
     char err[AVM_GPU_ERR_LEN];
-    /* Hand the kernel the window the C reads: the block plus its three-sample
-     * border, addressed as a small plane with the block at (3, 3). */
+    /* The kernels index the uploaded plane as (lead + base + tap - 3), so the
+     * upload starts at the window (block origin minus the three-sample border)
+     * and has to reach the last sample any tap touches: lead + last_base + 4,
+     * i.e. last_base + 2 * lead + 2 rows. Being a row short reads whatever the
+     * buffer held before, which only shows up once the previous contents differ
+     * - avm_gpu_seam_repro exists to catch exactly that. */
     const uint16_t *window = src - HOOK_BORDER * src_stride - HOOK_BORDER;
-    const int rows = h + 2 * HOOK_BORDER;
-    if (avm_gpu_inter_convolve_sr(g_hook.ctx, g_hook.inter, window, src_stride,
-                                  rows, HOOK_BORDER, HOOK_BORDER, filter_x,
-                                  filter_y, subpel_x_qn, subpel_y_qn, w, h, bd,
-                                  round_0, round_1, dst, dst_stride, err) == 0) {
+    const int subpel_bits = scaled ? SCALE_SUBPEL_BITS : 4;
+    const int last_by = (((h - 1) * y_step_qn) + subpel_y_qn) >> subpel_bits;
+    const int rows = last_by + 2 * HOOK_BORDER + 2;
+    const int rc =
+        scaled ? avm_gpu_inter_convolve_scaled_sr(
+                     g_hook.ctx, g_hook.inter, window, src_stride, rows,
+                     HOOK_BORDER, HOOK_BORDER, filter_x, filter_y, subpel_x_qn,
+                     x_step_qn, subpel_y_qn, y_step_qn, w, h, bd, round_0,
+                     round_1, dst, dst_stride, err)
+               : avm_gpu_inter_convolve_sr(g_hook.ctx, g_hook.inter, window,
+                                           src_stride, rows, HOOK_BORDER,
+                                           HOOK_BORDER, filter_x, filter_y,
+                                           subpel_x_qn, subpel_y_qn, w, h, bd,
+                                           round_0, round_1, dst, dst_stride,
+                                           err);
+    if (rc == 0) {
       g_hook.blocks++;
       handled = 1;
     }

@@ -296,6 +296,16 @@ if(ENABLE_TESTS)
   add_test(NAME avm_gpu_pcwiener_test COMMAND avm_gpu_pcwiener_test)
   set_tests_properties(avm_gpu_pcwiener_test PROPERTIES SKIP_RETURN_CODE 77)
 
+  # Inter seam, block level: replays the hook against the C reference over many
+  # freshly filled planes, so a window that is a row/column short - and therefore
+  # reads whatever the buffer held before - cannot hide. On a disagreement it
+  # replays the exact case to say whether it is deterministic or stale data.
+  add_executable(avm_gpu_seam_repro
+                 "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_seam_repro.c")
+  target_link_libraries(avm_gpu_seam_repro PRIVATE avm)
+  add_test(NAME avm_gpu_inter_seam_test COMMAND avm_gpu_seam_repro 400)
+  set_tests_properties(avm_gpu_inter_seam_test PROPERTIES SKIP_RETURN_CODE 77)
+
   # The loop-restoration seam as pc_wiener_stripe_highbd() calls it.
   add_executable(avm_gpu_lr_hook_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_lr_hook_test.c")

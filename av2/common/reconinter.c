@@ -160,10 +160,12 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
     if (!inter_pred_params->conv_params.is_compound &&
         !inter_pred_params->is_intrabc && inter_pred_params->interp_filter_params[0] &&
         inter_pred_params->interp_filter_params[1]) {
+      const int scaled = has_scale(subpel_params->xs, subpel_params->ys);
       SubpelParams sp = *subpel_params;
-      revert_scale_extra_bits(&sp);
-      if (sp.xs == SUBPEL_SHIFTS && sp.ys == SUBPEL_SHIFTS &&
-          avm_gpu_hook_inter(src, src_stride, dst, dst_stride,
+      /* 1/16 positions for an unscaled reference (the facade's convention),
+       * 1/1024 for a scaled one. */
+      if (!scaled) revert_scale_extra_bits(&sp);
+      if (avm_gpu_hook_inter(src, src_stride, dst, dst_stride,
                              inter_pred_params->block_width,
                              inter_pred_params->block_height,
                              inter_pred_params->bit_depth,
@@ -173,7 +175,8 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
                              inter_pred_params->interp_filter_params[1]->taps,
                              sp.subpel_x, sp.subpel_y,
                              inter_pred_params->conv_params.round_0,
-                             inter_pred_params->conv_params.round_1)) {
+                             inter_pred_params->conv_params.round_1, scaled,
+                             sp.xs, sp.ys)) {
         return;
       }
     }

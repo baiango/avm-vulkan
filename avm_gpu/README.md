@@ -135,6 +135,7 @@ and throughput is not claimed — this milestone is about correctness.
 | `test/avm_gpu_pcwiener_test.c` | end-to-end gate against `apply_pc_wiener_highbd()`: class ids, then the restored plane |
 | `test/avm_gpu_pcwiener_filter_test.c` | filter stage alone against `av2_convolve_symmetric_highbd_c()`, AVM's own filter banks and tap config |
 | `test/avm_gpu_lr_hook_test.c` | seam gate: procunit-sized stripes (64/32/partial) against `apply_pc_wiener_highbd()` |
+| `test/avm_gpu_seam_repro.c` | inter seam at block level: 400 hook-vs-C comparisons over freshly filled planes (unscaled and scaled, 4..64), and a replay of the first failing case to say whether it is deterministic or stale data |
 | `vulkan_hook.{h,c}` | encoder seam: `avm_gpu_hook_sad()`, `avm_gpu_hook_sad_multi()`, the residency scope, lazy device init, env-gated |
 | `vulkan_hook_var.{h,c}` | encoder seam for variance/SSE: content-keyed memo, block-area threshold, lazy device init |
 | `vulkan_hook_inter.{h,c}` | inter prediction seam: single reference, unscaled, 8-tap subpel, `avm_gpu_hook_inter()` |
@@ -385,16 +386,15 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 - Kernel families still missing: the forward DCT only covers 4x4/8x8. The inter
   seam covers single-reference **unscaled** 8-tap prediction; compound, warped,
   scaled and >8-tap encoder-side filters still run on the CPU.
-- Scaled references: the kernel now models `av2_highbd_convolve_2d_scale_c()`
-  (per-pixel 1/1024 phase) and is gated by 12 cases, and
-  `avm_gpu_inter_convolve_scaled_sr()` is available, but the **seam is not
-  wired for it yet**. The attempt is reverted because a direct reproduction of
-  the seam's window arithmetic (same block through `avm_gpu_hook_inter()` and
-  through the C) was intermittently wrong - i.e. the upload window is a row/col
-  short for some geometries and the result depends on stale buffer contents.
-  That hazard must be understood before the scaled branch goes live; the
-  unscaled encoder gate does not catch it because the border happens to hold
-  the right pixels there.
+- The inter seam's upload window is sized `last_base_y + 8` rows, which is one
+  more than the tap span suggests, deliberately: while investigating an
+  intermittent hook-vs-C disagreement I could not establish the exact floor
+  from the arithmetic alone, and a seam test that is one row short was *not*
+  detected by the comparison, so the slack is kept rather than tuned. The seam
+  test does catch real disagreements (it failed every run while an earlier
+  scaled attempt was wrong) and now passes 400 comparisons x 4 runs with blocks
+  from 4x4 to 64x64, scaled and unscaled. Measuring the true minimum and
+  dropping the slack is the open follow-up.
 - Loop restoration is wired (`AV2_GPU_LR=1` in `pc_wiener_stripe_highbd()`,
   which serves both the encoder and the decoder) and the seam is gated, but no
   end-to-end stream gate exists yet: with the settings in this repo the encoder
