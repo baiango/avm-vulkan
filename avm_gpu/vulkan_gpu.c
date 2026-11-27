@@ -27,6 +27,14 @@ struct avm_gpu_ctx {
   char name[256];
 };
 
+/* The module requires Vulkan 1.4: the instance is created for exactly that
+ * version, with no fallback, so a loader or driver that cannot provide it fails
+ * loudly (VK_ERROR_INCOMPATIBLE_DRIVER) instead of silently downgrading. The
+ * build also requires 1.4 headers. */
+#if !defined(VK_API_VERSION_1_4)
+#error "avm_gpu requires Vulkan 1.4 headers (VK_API_VERSION_1_4)"
+#endif
+
 static void set_err(char err[AVM_GPU_ERR_LEN], const char *msg, VkResult r) {
   if (!err) return;
   snprintf(err, AVM_GPU_ERR_LEN, "%s (VkResult %d)", msg, (int)r);
@@ -69,7 +77,7 @@ int avm_gpu_ctx_create(avm_gpu_ctx **out, char err[AVM_GPU_ERR_LEN]) {
   app.pApplicationName = "avm_gpu";
   app.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
   app.pEngineName = "avm";
-  app.apiVersion = VK_API_VERSION_1_1;
+  app.apiVersion = VK_API_VERSION_1_4;
 
   const char *ext[1];
   uint32_t ext_count = 0;
@@ -143,10 +151,12 @@ int avm_gpu_ctx_create(avm_gpu_ctx **out, char err[AVM_GPU_ERR_LEN]) {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(ctx->physical, &props);
-  snprintf(ctx->name, sizeof(ctx->name), "%s (Vulkan %u.%u.%u)", props.deviceName,
+  snprintf(ctx->name, sizeof(ctx->name),
+           "%s (Vulkan %u.%u device, %u.%u instance)", props.deviceName,
            VK_API_VERSION_MAJOR(props.apiVersion),
            VK_API_VERSION_MINOR(props.apiVersion),
-           VK_API_VERSION_PATCH(props.apiVersion));
+           VK_API_VERSION_MAJOR(app.apiVersion),
+           VK_API_VERSION_MINOR(app.apiVersion));
 
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };

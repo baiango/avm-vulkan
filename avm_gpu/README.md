@@ -327,7 +327,17 @@ export VK_DRIVER_FILES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
 
 `AVM_GPU_SAD_SPV` overrides the SPIR-V path baked in at compile time.
 
-## Measured (Apple M4, MoltenVK 1.4.2, Vulkan 1.3.357 via a 1.1 device)
+## Vulkan version
+
+The module requires **Vulkan 1.4**: it is built against the 1.4 headers (a build
+with older ones stops at `#error`) and creates its instance for exactly 1.4 with
+`VkApplicationInfo::apiVersion` - no fallback, so a loader or driver that cannot
+provide 1.4 fails with `VK_ERROR_INCOMPATIBLE_DRIVER` rather than quietly
+downgrading. `avm_gpu_device_name()` prints the device and instance versions
+next to each other. Last measured with MoltenVK 1.4.2, which reports 1.4 for
+both.
+
+## Measured (Apple M4, MoltenVK 1.4.2, Vulkan 1.4 instance and device)
 
 128 candidates per case, resident planes, one dispatch + fence wait:
 
