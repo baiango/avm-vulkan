@@ -134,6 +134,27 @@ int main(void) {
                 }
               }
               cases++;
+              if (diff && getenv("CDEF_DUMP")) {
+                static int dumped = 0;
+                if (dumped++ == 0) {
+                  for (int y = 0; y < h; y++) {
+                    printf("DUMP in  y%d:", y);
+                    for (int x = 0; x < w; x++)
+                      printf(" %4d", in[(i0 + y) * stride + j0 + x]);
+                    printf("\nDUMP cpu y%d:", y);
+                    for (int x = 0; x < w; x++)
+                      printf(" %4d", cpu[y * DSTRIDE + x]);
+                    printf("\nDUMP gpu y%d:", y);
+                    for (int x = 0; x < w; x++)
+                      printf(" %4d", gpu[y * DSTRIDE + x]);
+                    printf("\n");
+                  }
+                  printf("DUMP case dir %d pri %d sec %d pdamp %d sdamp %d shift %d "
+                         "variant %d\n",
+                         dir, kStrength[s][0], kStrength[s][1], pri_damping,
+                         sec_damping, kShift[sh], variant);
+                }
+              }
               if (diff) {
                 failures++;
                 if (failures < 6) {

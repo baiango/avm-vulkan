@@ -520,6 +520,33 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       rotate clip, i.e. a loss on unified memory)
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
+## Open cross-driver issues (NVIDIA, Vulkan 1.4.312)
+
+Running the gates on a second driver turned up mismatches that MoltenVK does not
+show. They are characterized but not fixed; the state below is what the box
+(NVIDIA GeForce RTX 5070 Ti, driver 580, Vulkan 1.4.312, headers and loader built
+from Khronos v1.4.312) reports today.
+
+- **CDEF, one sample per block**: `avm_gpu_cdef_test` fails 1 to 16 samples for
+  `dir 0`, primary 4, secondary 2, primary damping 4/6. A dumped case
+  (`CDEF_DUMP=1`, which prints the input block, the reference and the GPU block
+  for the first differing case) shows a single pixel: row 6 of column 7, input
+  937, reference 936, GPU 937 - the GPU's tap sum is ~0 where the reference's is
+  ~-9, at the block's right edge. `constrain()` and the tap tables match the
+  reference textually, and the validation layer reports nothing under
+  `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`, so this is not an
+  out-of-bounds read.
+- **Inter, 10-bit only**: `avm_gpu_inter_test` fails its `sr` cases at
+  `bd10` for block sizes (8,8) and (3,9) and every step, while `bd8` and
+  `bd12` pass. Bit depth is the only parameter that separates the failing
+  cases.
+- **PC-Wiener**: `avm_gpu_pcwiener_test` segfaults on this driver (no output at
+  all), after passing on MoltenVK in both placements.
+- **CCSSO seam**: `avm_gpu_ccso_seam_test` aborts.
+
+Four tests also report "Not Run" in that list because their binaries were not
+built in the box's target list, which is not a failure.
+
 ## Not done (M1/M2)
 
 - Native CUDA (NVIDIA) and Metal (Apple) backends to replace Vulkan on those
