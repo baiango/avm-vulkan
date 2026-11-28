@@ -146,6 +146,15 @@ int main(void) {
               if (diff && getenv("CDEF_DUMP")) {
                 static int dumped = 0;
                 if (dumped++ == 0) {
+                  /* The taps reach two rows/columns beyond the block; print
+                   * the whole bordered window the kernel can read. */
+                  const int r0 = -2, r1 = h + 1, c0 = -4, c1 = w + 3;
+                  for (int y = r0; y <= r1; y++) {
+                    printf("DUMP win y%+d:", y);
+                    for (int x = c0; x <= c1; x++)
+                      printf(" %5d", in[(i0 + y) * stride + j0 + x]);
+                    printf("\n");
+                  }
                   for (int y = 0; y < h; y++) {
                     printf("DUMP in  y%d:", y);
                     for (int x = 0; x < w; x++)

@@ -536,10 +536,22 @@ corruption). What is left looks like one class of bug:
   MoltenVK (whose staging copies start zeroed), which is why only the NVIDIA box
   shows it and why the count drifts. The Khronos validation layer reports
   nothing because those reads stay inside the declared binding.
-- **CDEF, the same class**: `dir 0`, primary 4, secondary 2, primary damping 4/6,
-  1 to 16 samples per block. `CDEF_DUMP=1` prints the input block, the reference
-  and the GPU block for the first differing case, which reduced it to row 6 of
-  column 7 (input 937, reference 936, GPU 937).
+- **CDEF is deterministic, and not the same class**: unlike inter, three runs
+  report the same five failing cases with the same sample counts (1, 14, 16, 2,
+  12), so it is an arithmetic difference rather than stale memory. The case is
+  `dir 0`, primary 4, secondary 2, primary damping 4/6. `CDEF_DUMP=1` prints the
+  bordered window the taps can reach (rows -2..+9, columns -4..+11), the input
+  block, the reference block and the GPU block; the first case comes down to row
+  6 of column 7 (input 937, reference 936, GPU 937, i.e. a tap sum of about -9
+  against the GPU's ~0). Excluded by inspection so far, all matching the
+  reference exactly: the eight direction entries and their `dir +/- 2` secondary
+  offsets, the `pri_strength >> coeff_shift & 1` tap selection, `constrain()`
+  including its `damping - msb(threshold)` shift, the sentinel handling in the
+  min/max clamp, the `(8 + sum - (sum < 0)) >> 4` rounding and the final clamp.
+  The next probe is the kernel's own per-pixel sum: `cdef.comp`'s last push
+  constant is an unused `pad`, which can carry a debug flag that makes the shader
+  write the tap sum instead of the filtered pixel, so the failing case can be
+  compared contribution by contribution.
 - `inter_seam_test` reports "Not Run" on the box because its target is not part
   of the target list used there.
 
