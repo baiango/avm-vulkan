@@ -57,7 +57,16 @@ static unsigned int rnd(void) {
   return rng_state >> 7;
 }
 
+/* The gates call AVM's own reference functions, several of which are RTCD
+ * pointers (NULL on x86 until the tables are set up - arm64 resolves them to C
+ * at link time, which is why MoltenVK never showed this). The encoder calls
+ * these at init; the gates do the same. */
+void av2_rtcd(void);
+void avm_dsp_rtcd(void);
+
 int main(void) {
+  av2_rtcd();
+  avm_dsp_rtcd();
   char err[AVM_GPU_ERR_LEN];
   avm_gpu_ctx *ctx = NULL;
   if (avm_gpu_ctx_create(&ctx, err) != 0) {

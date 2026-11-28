@@ -73,7 +73,16 @@ static const struct {
   { 64, 64 },
 };
 
+/* The gates call AVM's own reference functions, several of which are RTCD
+ * pointers (NULL on x86 until the tables are set up - arm64 resolves them to C
+ * at link time, which is why MoltenVK never showed this). The encoder calls
+ * these at init; the gates do the same. */
+void av2_rtcd(void);
+void avm_dsp_rtcd(void);
+
 int main(void) {
+  av2_rtcd();
+  avm_dsp_rtcd();
   /* Every block goes to the GPU and the memo stays on, so both shortcuts run. */
   setenv("AV2_GPU_VAR", "1", 1);
   setenv("AV2_GPU_VAR_MIN_AREA", "0", 1);
