@@ -476,21 +476,23 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 ## Not done (M1/M2)
 
 - Entropy coding, CDF state, headers, rate control: CPU by design.
-- Compound warped prediction (a warp on a two-reference block) is on the GPU:
-  the three warp kernels write the 16-bit conv buffer for the first reference
-  and average it with the second (weighted or plain, round offset,
-  `ROUND_POWER_OF_TWO`), gated by `avm_gpu_warp_test` with two *different*
-  references so the weighting cannot hide (36 compound cases: three variants x
-  two matrices x three sizes x plain/weighted). The encoder streams keep their
-  md5 with 312 / 3,244 compound warps on the GPU, but no gate stream's final
-  bitstream depends on a compound-warp prediction - they all lose the RD
-  decision. Tried, each time with a kernel control that changes every compound
-  warp's output (the round offset dropped): the half-pel clip at cpu-used 8 and
-  2, the 16:9 resized clip at cpu-used 8 and 2, the key-frame-resized clip at
-  cpu-used 6, and the noisy clip - every md5 stayed identical. So the
-  stream-level evidence here is "non-zero GPU count with the CPU md5"; the
-  correctness proof is the kernel gate, which does fail (64-255 samples per
-  case) when the compound maths is broken.
+- Compound warped prediction (a warp on a two-reference block) is on the GPU and
+  is proven at stream level. The kernels write the 16-bit conv buffer for the
+  first reference and average it with the second (weighted or plain, round
+  offset, `ROUND_POWER_OF_TWO`), gated by `avm_gpu_warp_test` with two
+  *different* references so the weighting cannot hide (36 compound cases: three
+  variants x two matrices x three sizes, plain/weighted).
+  The evidence that the kernel is on the encoding path is the gate's rotate clip
+  (`test/make_rotate_clip.py`, content rotating ~1.2 degrees and zooming 1% per
+  frame, 6 frames at cpu-used 8): there the encoder selects 1,144 compound warps
+  and a +1 on the kernel's compound high-precision buffer changes the stream
+  (`da802a1e...` vs the CPU's `3e43aca6...`). The other gate clips only
+  *evaluate* compound warps - the half-pel clip at cpu-used 8 and 2, the 16:9 and
+  4:3 resized clips, the key-frame-resized clip and the noisy clip all keep
+  their md5 under that control, and under a +1 on the compound *average* output
+  as well (even writing 0 there changes nothing, because the blend consumes the
+  conv buffer, not that average). So: one clip selects it and is gated on the
+  CPU md5, the rest are gated for "non-zero GPU count with the CPU md5".
 - Every warp path is on the GPU: the extended-range kernel now takes the warp
   boundary box (the encoder always sets one on that path) and clamps its
   reference reads to the per-8x8 limits, so the seam declines no warp at all -
