@@ -361,6 +361,11 @@ if(ENABLE_TESTS)
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_inter_test.c")
   target_link_libraries(avm_gpu_inter_test PRIVATE avm)
   add_test(NAME avm_gpu_inter_test COMMAND avm_gpu_inter_test)
+  # Same gate with the inter buffers in the device-local arena.
+  add_test(NAME avm_gpu_inter_test_arena COMMAND avm_gpu_inter_test)
+  set_tests_properties(avm_gpu_inter_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
   set_tests_properties(avm_gpu_inter_test PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(avm_gpu_deblock_test

@@ -168,10 +168,9 @@ int avm_gpu_arena_alloc(avm_gpu_ctx *ctx, avm_gpu_arena *a, VkDeviceSize size,
   const VkDeviceSize need = align_up(size ? size : 4);
   for (int i = 0; i < a->n_blocks; i++) {
     if (!a->blocks[i].free || a->blocks[i].size < need) continue;
-    arena_block *b = &a->blocks[i];
-    if (b->size == need) {
-      b->free = 0;
-      *offset = b->offset;
+    if (a->blocks[i].size == need) {
+      a->blocks[i].free = 0;
+      *offset = a->blocks[i].offset;
       return 0;
     }
     /* Split. */
@@ -188,6 +187,10 @@ int avm_gpu_arena_alloc(avm_gpu_ctx *ctx, avm_gpu_arena *a, VkDeviceSize size,
     memmove(&a->blocks[i + 2], &a->blocks[i + 1],
             (size_t)(a->n_blocks - i - 1) * sizeof(*a->blocks));
     a->n_blocks++;
+    /* Re-read the block after the possible realloc above: a pointer taken
+     * before it would dangle and corrupt the table (which produced
+     * overlapping allocations). */
+    arena_block *b = &a->blocks[i];
     arena_block *tail = &a->blocks[i + 1];
     tail->offset = b->offset + need;
     tail->size = b->size - need;

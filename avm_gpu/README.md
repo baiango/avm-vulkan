@@ -171,8 +171,9 @@ and throughput is not claimed — this milestone is about correctness.
   the encoder parity gate passes with `AVM_GPU_PACK16=1` exported.
 - **Two placements.** By default buffers are host-visible and coherent: planes
   are uploaded by `memcpy` and results read back after the fence. With
-  `AV2_GPU_ARENA=1` the SAD, variance and warp modules instead suballocate their
-  buffers from a single device-local `VkBuffer` (`arena.{h,c}`), upload through
+  `AV2_GPU_ARENA=1` the SAD, variance, warp and inter modules instead
+  suballocate their buffers from a single device-local `VkBuffer`
+  (`arena.{h,c}`), upload through
   a reusable host-visible staging buffer with `vkCmdCopyBuffer`, and read back
   the same way. The descriptor offset of a suballocation travels in
   `avm_gpu_buf.offset`, and a suballocation is recognisable by
@@ -514,11 +515,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   (about 6 KB for a 32x32 unit). The device-local arena (`AV2_GPU_ARENA=1`) now
   covers the warp module too - the reference, prediction, high-precision and
   boundary-box buffers of the regular, extended-range and scaled kernels go
-  through `avm_gpu_slot_*` like SAD and variance. Inter, compound, CWP, deblock,
-  CDEF and CCSO still use host-visible buffers and re-upload per call.
+  through `avm_gpu_slot_*` like SAD, variance and the inter module (reference,
+  filter, prediction, compound high-precision, blend sources/mask, CWP and the
+  CWP convolve buffers; an arena slot gets a host shadow that the existing fill
+  and read loops keep using). Deblock, CDEF, CCSO, intra, the transforms and
+  PC-Wiener still use host-visible buffers and re-upload per call.
   Measured on the rotate clip (6 frames, cpu-used 8, `AV2_GPU_INTER=1`): 104 s
-  host-visible vs 118 s through the arena with the same md5 - the staging copies
-  cost more than they save on unified memory, so the arena stays opt-in.
+  host-visible vs 118 s through the arena for the warp buffers alone, and 276 s
+  when the inter module's windows go through it too, with the same md5 in every
+  case - the staging copies cost more than they save on unified memory, so the
+  arena stays opt-in.
 - Scaled compound is live. The SIGBUS that blocked it was a reproducer bug -
   it passed `scaled=0` together with a 1/1024 step (910), so the seam's window
   arithmetic (`(h-1)*step >> 4`) produced a 3592-row window and read outside the

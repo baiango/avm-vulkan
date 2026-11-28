@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_INTER_SPV_PATH
@@ -39,7 +40,21 @@ typedef struct cwp_constants {
   uint32_t sb, x_step, y_step, packed;
 } cwp_constants;
 
+#define INTER_SHADOW_MAX 16
+
+/* Host-side mirror of a slot. With host-visible buffers the mirror *is* the
+ * mapped pointer, so nothing changes; an arena slot gets a shadow that the
+ * existing fill/read loops keep writing, uploaded before and downloaded after
+ * the dispatch. */
+typedef struct inter_shadow {
+  avm_gpu_buf *buf;
+  uint32_t *host;
+  size_t bytes;
+} inter_shadow;
+
 struct avm_gpu_inter {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  inter_shadow shadow[INTER_SHADOW_MAX];
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *blend_pipe;
   avm_gpu_pipeline *cwp_pipe;
@@ -71,13 +86,60 @@ typedef struct push_constants {
  * halving the bytes; an odd stride keeps the one-sample-per-word layout. */
 static int pack16_for(int stride) { return (stride % 2) == 0; }
 
-static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
-                      VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
-  if (*cap >= need) return 0;
-  avm_gpu_buf_destroy(ctx, buf);
-  if (avm_gpu_buf_create(ctx, need, buf, err) != 0) return -1;
-  *cap = buf->size;
-  return 0;
+static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_inter *in, avm_gpu_buf *buf,
+                      VkDeviceSize *cap, VkDeviceSize need,
+                      char err[AVM_GPU_ERR_LEN]) {
+  return avm_gpu_slot_reserve(ctx, in->arena, buf, cap, need, err);
+}
+
+/* Host pointer the fill loops write to: the mapped buffer, or the shadow. */
+static uint32_t *inter_host(avm_gpu_ctx *ctx, avm_gpu_inter *in,
+                            avm_gpu_buf *buf, size_t bytes,
+                            char err[AVM_GPU_ERR_LEN]) {
+  (void)ctx;
+  if (buf->mapped) return buf->mapped;
+  inter_shadow *slot = NULL;
+  for (int i = 0; i < INTER_SHADOW_MAX; i++) {
+    if (in->shadow[i].buf == buf) {
+      slot = &in->shadow[i];
+      break;
+    }
+    if (!in->shadow[i].buf && !slot) slot = &in->shadow[i];
+  }
+  if (!slot) {
+    snprintf(err, AVM_GPU_ERR_LEN, "shadow table full");
+    return NULL;
+  }
+  if (slot->buf == buf && slot->bytes >= bytes) return slot->host;
+  free(slot->host);
+  slot->host = malloc(bytes ? bytes : 4);
+  /* A fresh host-visible VkBuffer reads as zero and the kernels rely on the
+   * same starting state (the blend reads the destination it is about to
+   * write), so a new shadow starts zeroed too. */
+  if (slot->host) memset(slot->host, 0, bytes ? bytes : 4);
+  slot->buf = slot->host ? buf : NULL;
+  slot->bytes = slot->host ? bytes : 0;
+  if (!slot->host) {
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return NULL;
+  }
+  return slot->host;
+}
+
+static int inter_push(avm_gpu_ctx *ctx, avm_gpu_inter *in, avm_gpu_buf *buf,
+                      size_t bytes, char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) return 0;
+  uint32_t *host = inter_host(ctx, in, buf, bytes, err);
+  if (!host) return -1;
+  return avm_gpu_slot_upload(ctx, in->arena, buf, host, bytes, err);
+}
+
+static int inter_pull(avm_gpu_ctx *ctx, avm_gpu_inter *in, avm_gpu_buf *buf,
+                      size_t bytes, char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) return 0;
+  uint32_t *host = inter_host(ctx, in, buf, bytes, err);
+  if (!host) return -1;
+  return avm_gpu_slot_download(ctx, in->arena, buf, host, bytes, err);
 }
 
 int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
@@ -87,6 +149,20 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
   if (!in) {
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
+  }
+  const char *arena_env = getenv("AV2_GPU_ARENA");
+  if (arena_env && *arena_env && strcmp(arena_env, "0")) {
+    const char *mb = getenv("AV2_GPU_ARENA_MB");
+    const VkDeviceSize arena_bytes =
+        (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+    char aerr[AVM_GPU_ERR_LEN];
+    in->arena = NULL;
+    if (avm_gpu_arena_create(ctx, arena_bytes, &in->arena, aerr) != 0) {
+      if (getenv("AV2_GPU_ARENA_VERBOSE")) {
+        fprintf(stderr, "avm_gpu: inter arena unavailable (%s)\n", aerr);
+      }
+      in->arena = NULL;
+    }
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_CWPCONV_SPV_PATH,
                               "AVM_GPU_CWPCONV_SPV", 4, sizeof(cwp_constants),
@@ -130,6 +206,8 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   avm_gpu_buf_destroy(ctx, &in->s1);
   avm_gpu_buf_destroy(ctx, &in->mask);
   avm_gpu_buf_destroy(ctx, &in->bdst);
+  avm_gpu_arena_destroy(ctx, in->arena);
+  for (int i = 0; i < INTER_SHADOW_MAX; i++) free(in->shadow[i].host);
   avm_gpu_buf_destroy(ctx, &in->cpred);
   avm_gpu_buf_destroy(ctx, &in->cref);
   avm_gpu_buf_destroy(ctx, &in->cout);
@@ -199,31 +277,45 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
    * the sr path came back with garbage on MoltenVK (zeros and clips in some
    * columns), while 64x64 works for every sr and scaled case. */
   const size_t conv_n = conv ? (size_t)conv_stride * (size_t)h : 64 * 64;
-  if (ensure_buf(ctx, &in->src, &in->src_cap,
+  if (ensure_buf(ctx, in, &in->src, &in->src_cap,
                  (VkDeviceSize)pixels * (packed ? 2 : 4), err) ||
-      ensure_buf(ctx, &in->filt, &in->filt_cap,
+      ensure_buf(ctx, in, &in->filt, &in->filt_cap,
                  (VkDeviceSize)filt_entries * 4, err) ||
-      ensure_buf(ctx, &in->dst, &in->dst_cap,
+      ensure_buf(ctx, in, &in->dst, &in->dst_cap,
                  (VkDeviceSize)dst_stride * h * 4, err) ||
-      ensure_buf(ctx, &in->conv, &in->conv_cap, (VkDeviceSize)conv_n * 4, err)) {
+      ensure_buf(ctx, in, &in->conv, &in->conv_cap, (VkDeviceSize)conv_n * 4, err)) {
     return -1;
   }
+  const size_t src_bytes = (size_t)pixels * (packed ? 2 : 4);
+  const size_t filt_bytes = (size_t)filt_entries * 4;
+  const size_t dst_bytes = (size_t)dst_stride * (size_t)h * 4;
+  const size_t conv_bytes = conv_n * 4;
+  uint8_t *src_host =
+      (uint8_t *)inter_host(ctx, in, &in->src, src_bytes, err);
+  uint32_t *fp = inter_host(ctx, in, &in->filt, filt_bytes, err);
+  uint32_t *dst_host = inter_host(ctx, in, &in->dst, dst_bytes, err);
+  uint32_t *conv_host = inter_host(ctx, in, &in->conv, conv_bytes, err);
+  if (!src_host || !fp || !dst_host || !conv_host) return -1;
   if (packed) {
-    memcpy(in->src.mapped, src, (size_t)pixels * 2);
+    memcpy(src_host, src, (size_t)pixels * 2);
   } else {
-    memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+    memcpy(src_host, in->expand, (size_t)pixels * 4);
   }
-  uint32_t *fp = in->filt.mapped;
   for (int i = 0; i < INTER_FILTER_ENTRIES; i++) fp[i] = (uint32_t)filter[i];
   if (filter_y) {
     for (int i = 0; i < INTER_FILTER_ENTRIES; i++) {
       fp[INTER_FILTER_ENTRIES + i] = (uint32_t)filter_y[i];
     }
   }
-  memset(in->dst.mapped, 0, (size_t)dst_stride * h * 4);
+  memset(dst_host, 0, dst_bytes);
   if (conv) {
-    uint32_t *cv = in->conv.mapped;
-    for (size_t i = 0; i < conv_n; i++) cv[i] = conv[i];
+    for (size_t i = 0; i < conv_n; i++) conv_host[i] = conv[i];
+  }
+  if (inter_push(ctx, in, &in->src, src_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->filt, filt_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->dst, dst_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->conv, conv_bytes, err) != 0) {
+    return -1;
   }
 
   const avm_gpu_buf bufs[4] = { in->src, in->filt, in->dst, in->conv };
@@ -256,7 +348,12 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = in->dst.mapped;
+  if (inter_pull(ctx, in, &in->dst, dst_bytes, err) != 0) return -1;
+  if (conv && !do_average &&
+      inter_pull(ctx, in, &in->conv, conv_bytes, err) != 0) {
+    return -1;
+  }
+  const uint32_t *res = dst_host;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
@@ -264,11 +361,10 @@ static int convolve_impl(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   }
   if (conv && !do_average) {
     /* The first reference's output is the high-precision buffer. */
-    const uint32_t *cv = in->conv.mapped;
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         ((uint16_t *)conv)[(size_t)y * conv_stride + x] =
-            (uint16_t)cv[(size_t)y * conv_stride + x];
+            (uint16_t)conv_host[(size_t)y * conv_stride + x];
       }
     }
   }
@@ -321,19 +417,29 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   const size_t mk_n = (size_t)mask_stride * mh;
   const size_t dst_n = (size_t)dst_stride * h;
 
-  if (ensure_buf(ctx, &in->s0, &in->s0_cap, (VkDeviceSize)s0_n * 4, err) ||
-      ensure_buf(ctx, &in->s1, &in->s1_cap, (VkDeviceSize)s1_n * 4, err) ||
-      ensure_buf(ctx, &in->mask, &in->mask_cap, (VkDeviceSize)mk_n * 4, err) ||
-      ensure_buf(ctx, &in->bdst, &in->bdst_cap, (VkDeviceSize)dst_n * 4, err)) {
+  if (ensure_buf(ctx, in, &in->s0, &in->s0_cap, (VkDeviceSize)s0_n * 4, err) ||
+      ensure_buf(ctx, in, &in->s1, &in->s1_cap, (VkDeviceSize)s1_n * 4, err) ||
+      ensure_buf(ctx, in, &in->mask, &in->mask_cap, (VkDeviceSize)mk_n * 4, err) ||
+      ensure_buf(ctx, in, &in->bdst, &in->bdst_cap, (VkDeviceSize)dst_n * 4, err)) {
     return -1;
   }
 
-  uint32_t *p0 = in->s0.mapped;
-  uint32_t *p1 = in->s1.mapped;
+  const size_t s0_bytes = s0_n * 4, s1_bytes = s1_n * 4;
+  const size_t mk_bytes = mk_n * 4, bdst_bytes = dst_n * 4;
+  uint32_t *p0 = inter_host(ctx, in, &in->s0, s0_bytes, err);
+  uint32_t *p1 = inter_host(ctx, in, &in->s1, s1_bytes, err);
+  uint32_t *pm = inter_host(ctx, in, &in->mask, mk_bytes, err);
+  uint32_t *bdst_host = inter_host(ctx, in, &in->bdst, bdst_bytes, err);
+  if (!p0 || !p1 || !pm || !bdst_host) return -1;
   for (size_t i = 0; i < s0_n; i++) p0[i] = src0[i];
   for (size_t i = 0; i < s1_n; i++) p1[i] = src1[i];
-  uint32_t *pm = in->mask.mapped;
   for (size_t i = 0; i < mk_n; i++) pm[i] = mask[i];
+  if (inter_push(ctx, in, &in->s0, s0_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->s1, s1_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->mask, mk_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->bdst, bdst_bytes, err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { in->s0, in->s1, in->mask, in->bdst };
   blend_pc pc = { (uint32_t)s0_stride, (uint32_t)s1_stride,
@@ -347,7 +453,8 @@ int avm_gpu_inter_blend_a64(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = in->bdst.mapped;
+  if (inter_pull(ctx, in, &in->bdst, bdst_bytes, err) != 0) return -1;
+  const uint32_t *res = bdst_host;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
@@ -378,15 +485,23 @@ int avm_gpu_inter_cwp(avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *pred,
   const size_t pn = (size_t)pred_stride * h;
   const size_t rn = (size_t)ref_stride * h;
   const size_t on = (size_t)out_stride * h;
-  if (ensure_buf(ctx, &in->cpred, &in->cpred_cap, (VkDeviceSize)pn * 4, err) ||
-      ensure_buf(ctx, &in->cref, &in->cref_cap, (VkDeviceSize)rn * 4, err) ||
-      ensure_buf(ctx, &in->cout, &in->cout_cap, (VkDeviceSize)on * 4, err)) {
+  if (ensure_buf(ctx, in, &in->cpred, &in->cpred_cap, (VkDeviceSize)pn * 4, err) ||
+      ensure_buf(ctx, in, &in->cref, &in->cref_cap, (VkDeviceSize)rn * 4, err) ||
+      ensure_buf(ctx, in, &in->cout, &in->cout_cap, (VkDeviceSize)on * 4, err)) {
     return -1;
   }
-  uint32_t *pp = in->cpred.mapped;
-  uint32_t *rp = in->cref.mapped;
+  const size_t pn_bytes = pn * 4, rn_bytes = rn * 4, on_bytes = on * 4;
+  uint32_t *pp = inter_host(ctx, in, &in->cpred, pn_bytes, err);
+  uint32_t *rp = inter_host(ctx, in, &in->cref, rn_bytes, err);
+  uint32_t *cout_host = inter_host(ctx, in, &in->cout, on_bytes, err);
+  if (!pp || !rp || !cout_host) return -1;
   for (size_t i = 0; i < pn; i++) pp[i] = pred[i];
   for (size_t i = 0; i < rn; i++) rp[i] = ref[i];
+  if (inter_push(ctx, in, &in->cpred, pn_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->cref, rn_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->cout, on_bytes, err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[3] = { in->cpred, in->cref, in->cout };
   cwp_pc pc = { (uint32_t)pred_stride, (uint32_t)ref_stride,
@@ -398,7 +513,8 @@ int avm_gpu_inter_cwp(avm_gpu_ctx *ctx, avm_gpu_inter *in, const uint16_t *pred,
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, in->cwp_pipe, bufs, 3, &pc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
-  const uint32_t *res = in->cout.mapped;
+  if (inter_pull(ctx, in, &in->cout, on_bytes, err) != 0) return -1;
+  const uint32_t *res = cout_host;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       out[(size_t)y * out_stride + x] = (uint16_t)res[y * out_stride + x];
@@ -521,30 +637,41 @@ int avm_gpu_inter_cwp_convolve(
 
   const size_t conv_n = (size_t)conv_stride * (size_t)h;
   const size_t dst_n = (size_t)dst_stride * (size_t)h;
-  if (ensure_buf(ctx, &in->src, &in->src_cap,
+  if (ensure_buf(ctx, in, &in->src, &in->src_cap,
                  (VkDeviceSize)pixels * (packed ? 2 : 4), err) ||
-      ensure_buf(ctx, &in->filt, &in->filt_cap,
+      ensure_buf(ctx, in, &in->filt, &in->filt_cap,
                  (VkDeviceSize)(2 * INTER_FILTER_ENTRIES) * 4, err) ||
-      ensure_buf(ctx, &in->cwpconv_conv, &in->cwpconv_conv_cap,
+      ensure_buf(ctx, in, &in->cwpconv_conv, &in->cwpconv_conv_cap,
                  (VkDeviceSize)conv_n * 4, err) ||
-      ensure_buf(ctx, &in->cwpconv_dst, &in->cwpconv_dst_cap,
+      ensure_buf(ctx, in, &in->cwpconv_dst, &in->cwpconv_dst_cap,
                  (VkDeviceSize)dst_n * 4, err)) {
     return -1;
   }
+  const size_t src_bytes = (size_t)pixels * (packed ? 2 : 4);
+  const size_t filt_bytes = (size_t)(2 * INTER_FILTER_ENTRIES) * 4;
+  const size_t conv_bytes = conv_n * 4, dst_bytes = dst_n * 4;
+  uint8_t *src_host = (uint8_t *)inter_host(ctx, in, &in->src, src_bytes, err);
+  int *fp = (int *)inter_host(ctx, in, &in->filt, filt_bytes, err);
+  uint32_t *cv = inter_host(ctx, in, &in->cwpconv_conv, conv_bytes, err);
+  uint32_t *dp = inter_host(ctx, in, &in->cwpconv_dst, dst_bytes, err);
+  if (!src_host || !fp || !cv || !dp) return -1;
   if (packed) {
-    memcpy(in->src.mapped, src, (size_t)pixels * 2);
+    memcpy(src_host, src, (size_t)pixels * 2);
   } else {
-    memcpy(in->src.mapped, in->expand, (size_t)pixels * 4);
+    memcpy(src_host, in->expand, (size_t)pixels * 4);
   }
-  int *fp = in->filt.mapped;
   for (int i = 0; i < INTER_FILTER_ENTRIES; i++) {
     fp[i] = (int)filter_x[i];
     fp[INTER_FILTER_ENTRIES + i] = (int)filter_y[i];
   }
-  uint32_t *cv = in->cwpconv_conv.mapped;
   for (size_t i = 0; i < conv_n; i++) cv[i] = conv[i];
-  uint32_t *dp = in->cwpconv_dst.mapped;
   for (size_t i = 0; i < dst_n; i++) dp[i] = dst[i];
+  if (inter_push(ctx, in, &in->src, src_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->filt, filt_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->cwpconv_conv, conv_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->cwpconv_dst, dst_bytes, err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { in->src, in->filt, in->cwpconv_conv,
                                 in->cwpconv_dst };
@@ -579,10 +706,15 @@ int avm_gpu_inter_cwp_convolve(
                                               &pc, sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res_conv = in->cwpconv_conv.mapped;
+  if (inter_pull(ctx, in, &in->cwpconv_conv, conv_bytes, err) != 0) return -1;
+  if (!(conv_index == 0 && do_average == 0) &&
+      inter_pull(ctx, in, &in->cwpconv_dst, dst_bytes, err) != 0) {
+    return -1;
+  }
+  const uint32_t *res_conv = cv;
   for (size_t i = 0; i < conv_n; i++) conv[i] = (uint16_t)res_conv[i];
   if (!(conv_index == 0 && do_average == 0)) {
-    const uint32_t *res_dst = in->cwpconv_dst.mapped;
+    const uint32_t *res_dst = dp;
     for (size_t i = 0; i < dst_n; i++) dst[i] = (uint16_t)res_dst[i];
   }
   return 0;
@@ -619,19 +751,29 @@ int avm_gpu_inter_blend_a64_d16(avm_gpu_ctx *ctx, avm_gpu_inter *in,
   const size_t mk_n = (size_t)mask_stride * mh;
   const size_t dst_n = (size_t)dst_stride * h;
 
-  if (ensure_buf(ctx, &in->s0, &in->s0_cap, (VkDeviceSize)s0_n * 4, err) ||
-      ensure_buf(ctx, &in->s1, &in->s1_cap, (VkDeviceSize)s1_n * 4, err) ||
-      ensure_buf(ctx, &in->mask, &in->mask_cap, (VkDeviceSize)mk_n * 4, err) ||
-      ensure_buf(ctx, &in->bdst, &in->bdst_cap, (VkDeviceSize)dst_n * 4, err)) {
+  if (ensure_buf(ctx, in, &in->s0, &in->s0_cap, (VkDeviceSize)s0_n * 4, err) ||
+      ensure_buf(ctx, in, &in->s1, &in->s1_cap, (VkDeviceSize)s1_n * 4, err) ||
+      ensure_buf(ctx, in, &in->mask, &in->mask_cap, (VkDeviceSize)mk_n * 4, err) ||
+      ensure_buf(ctx, in, &in->bdst, &in->bdst_cap, (VkDeviceSize)dst_n * 4, err)) {
     return -1;
   }
 
-  uint32_t *p0 = in->s0.mapped;
-  uint32_t *p1 = in->s1.mapped;
+  const size_t s0_bytes = s0_n * 4, s1_bytes = s1_n * 4;
+  const size_t mk_bytes = mk_n * 4, bdst_bytes = dst_n * 4;
+  uint32_t *p0 = inter_host(ctx, in, &in->s0, s0_bytes, err);
+  uint32_t *p1 = inter_host(ctx, in, &in->s1, s1_bytes, err);
+  uint32_t *pm = inter_host(ctx, in, &in->mask, mk_bytes, err);
+  uint32_t *bdst_host = inter_host(ctx, in, &in->bdst, bdst_bytes, err);
+  if (!p0 || !p1 || !pm || !bdst_host) return -1;
   for (size_t i = 0; i < s0_n; i++) p0[i] = src0[i];
   for (size_t i = 0; i < s1_n; i++) p1[i] = src1[i];
-  uint32_t *pm = in->mask.mapped;
   for (size_t i = 0; i < mk_n; i++) pm[i] = mask[i];
+  if (inter_push(ctx, in, &in->s0, s0_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->s1, s1_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->mask, mk_bytes, err) != 0 ||
+      inter_push(ctx, in, &in->bdst, bdst_bytes, err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { in->s0, in->s1, in->mask, in->bdst };
   blend_pc pc = { (uint32_t)s0_stride,
@@ -652,7 +794,8 @@ int avm_gpu_inter_blend_a64_d16(avm_gpu_ctx *ctx, avm_gpu_inter *in,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = in->bdst.mapped;
+  if (inter_pull(ctx, in, &in->bdst, bdst_bytes, err) != 0) return -1;
+  const uint32_t *res = bdst_host;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dst_stride + x] = (uint16_t)res[y * dst_stride + x];
