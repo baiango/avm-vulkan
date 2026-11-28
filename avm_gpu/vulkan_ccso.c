@@ -216,21 +216,11 @@ int avm_gpu_ccso_block_window(avm_gpu_ctx *ctx, avm_gpu_ccso *cc,
   }
   const int win_w = x_end + 2 * dh;
   const int win_h = y_end + 2 * dv;
-  /* The kernel reads at most one row below the block and two columns beyond
-   * it; the destination is written through a scratch buffer so a block on the
-   * plane's last row never touches the row below it. */
-  const int dst_rows = dv + y_end;
-  uint16_t *dst_stage =
-      calloc((size_t)dst_rows * (size_t)dst_stride, sizeof(*dst_stage));
-  if (!dst_stage) {
-    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
-    return -1;
-  }
-  for (int j = 0; j < dst_rows; j++) {
-    memcpy(dst_stage + (size_t)j * dst_stride,
-           dst + (size_t)(j - dv) * dst_stride + (x - dh),
-           (size_t)win_w * sizeof(*dst));
-  }
+  /* avm_gpu_ccso_block() copies pic_h rows of dst_stride words in and back out,
+   * so the staged destination must be that tall and that wide: win_h is larger
+   * than the block (the filter reads one row below it) and win_w can exceed the
+   * plane's stride at the right edge. */
+  const int stage_stride = win_w > dst_stride ? win_w : dst_stride;
 
   /* Luma: the reference rows/columns line up with the plane, so the window is
    * just a pointer into it. Chroma reads a subsampled luma reference, whose
@@ -238,15 +228,12 @@ int avm_gpu_ccso_block_window(avm_gpu_ctx *ctx, avm_gpu_ccso *cc,
   const uint16_t *src_win = NULL;
   uint16_t *src_stage = NULL;
   int src_pic_w = win_w, src_pic_h = win_h;
-  if (y_uv_hscale == 0 && y_uv_vscale == 0) {
-    src_win = src_y - (size_t)dv * src_stride + (x - dh);
-  } else {
+  if (y_uv_hscale != 0 || y_uv_vscale != 0) {
     const int src_cols = (((dh + x_end - 1) << y_uv_hscale)) + 3;
     const int src_rows = (((dv + y_end - 1) << y_uv_vscale)) + 2;
     src_stage = calloc((size_t)src_rows * (size_t)src_stride,
                        sizeof(*src_stage));
     if (!src_stage) {
-      free(dst_stage);
       snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
       return -1;
     }
@@ -261,21 +248,44 @@ int avm_gpu_ccso_block_window(avm_gpu_ctx *ctx, avm_gpu_ccso *cc,
     }
     src_win = src_stage;
     src_pic_w = src_cols;
-    src_pic_h = src_rows > dst_rows ? src_rows : dst_rows;
+    src_pic_h = src_rows > win_h ? src_rows : win_h;
+  } else {
+    src_win = src_y - (size_t)dv * src_stride + (x - dh);
   }
 
-  const avm_gpu_buf *unused = NULL;
-  (void)unused;
-  /* pic_w/pic_h only bound the dispatch: they have to be at least the block. */
+  const int dst_rows = src_pic_h;
+  uint16_t *dst_stage =
+      calloc((size_t)dst_rows * (size_t)stage_stride, sizeof(*dst_stage));
+  if (!dst_stage) {
+    free(src_stage);
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return -1;
+  }
+  for (int j = 0; j < dst_rows; j++) {
+    const int srow = j - dv;
+    const uint16_t *src_row = dst + (size_t)srow * dst_stride;
+    uint16_t *drow = dst_stage + (size_t)j * stage_stride;
+    for (int i = 0; i < win_w; i++) {
+      const int scol = x - dh + i;
+      /* Past the plane's stride the row is padded with its last sample rather
+       * than read out of the buffer. */
+      const int c = (srow < 0 || srow >= pic_h)
+                        ? 0
+                        : (scol < 0 ? 0
+                                    : (scol >= dst_stride ? dst_stride - 1 : scol));
+      drow[i] = (srow < 0 || srow >= pic_h) ? 0 : src_row[c];
+    }
+  }
+
   const int rc = avm_gpu_ccso_block(
-      ctx, cc, src_win, src_stride, dst_stage, dst_stride, src_pic_w,
+      ctx, cc, src_win, src_stride, dst_stage, stage_stride, src_pic_w,
       src_pic_h, dh, dv, offset_buf, src_loc_0, src_loc_1, y_uv_hscale,
       y_uv_vscale, thr, neg_thr, max_val, x_end, y_end, single_band,
       shift_bits, edge_clf, bo_only, dst_stage, err);
   if (rc == 0) {
     for (int j = 0; j < y_end; j++) {
       memcpy(dst + (size_t)j * dst_stride + x,
-             dst_stage + (size_t)(j + dv) * dst_stride + dh,
+             dst_stage + (size_t)(j + dv) * stage_stride + dh,
              (size_t)x_end * sizeof(*dst));
     }
   }

@@ -522,22 +522,30 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 
 ## Open cross-driver issues (NVIDIA, Vulkan 1.4.312)
 
-Gates on the box: **23 of 29 pass** (was 15 of 25). The RTCD initialisation below
-fixed the largest group; what is left is characterized in this section.
+Gates on the box: 24 of 29 pass. Two fixes have landed since the list was first
+written (RTCD initialisation, below, and the CCSO staging bug, which was heap
+corruption). What is left looks like one class of bug:
 
-- **CDEF, one sample per block**: `avm_gpu_cdef_test` fails 1 to 16 samples for
-  `dir 0`, primary 4, secondary 2, primary damping 4/6. A dumped case
-  (`CDEF_DUMP=1`, which prints the input block, the reference and the GPU block
-  for the first differing case) reduces it to a single pixel: row 6 of column 7,
-  input 937, reference 936, GPU 937 - the GPU's tap sum is ~0 where the
-  reference's is ~-9, at the block's right edge. `constrain()` and the tap tables
-  match the reference textually, and the validation layer reports nothing under
-  `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`, so it is not an
-  out-of-bounds read.
-- **CCSSO seam, heap corruption**: `avm_gpu_ccso_seam_test` dies with glibc's
-  `free(): corrupted unsorted chunks` after the hook initialises. Something in
-  the seam path writes past a heap buffer; glibc trips over it, MoltenVK's
-  allocator did not. An AddressSanitizer run is the next probe.
+- **Reads of memory the host did not upload for that call.** `inter_test` and
+  `inter_test_arena` fail their `sr` cases at bd10, and the number of failing
+  cases is **not stable**: three runs of the same binary reported 23, 23 and 26
+  mismatches. The CDEF failure below is the same shape at smaller scale - one
+  sample per block whose tap sum comes out ~0 on the GPU where the reference's
+  is ~-9. A kernel reading a few samples outside what that call uploaded sees
+  whatever the buffer held from an earlier call: stale bytes on NVIDIA, zeros on
+  MoltenVK (whose staging copies start zeroed), which is why only the NVIDIA box
+  shows it and why the count drifts. The Khronos validation layer reports
+  nothing because those reads stay inside the declared binding.
+- **CDEF, the same class**: `dir 0`, primary 4, secondary 2, primary damping 4/6,
+  1 to 16 samples per block. `CDEF_DUMP=1` prints the input block, the reference
+  and the GPU block for the first differing case, which reduced it to row 6 of
+  column 7 (input 937, reference 936, GPU 937).
+- `inter_seam_test` reports "Not Run" on the box because its target is not part
+  of the target list used there.
+
+The next probe for both is to dump the *uploaded window* against the samples each
+kernel actually reads (the CDEF case is small enough to do by hand), rather than
+to keep looking at the arithmetic, which matches the reference.
 
 ### Fixed here: the gates never initialised RTCD
 
