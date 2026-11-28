@@ -435,6 +435,14 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       WARP_PRED branch runs the affine or extended-range kernel when
       `AV2_GPU_INTER=1` (4,701 warped blocks in the gate at cpu-used 8, 77,403 at
       cpu-used 2, bitstreams unchanged)
+- [x] compound warped prediction proven at stream level: the gate now encodes a
+      rotating/zooming clip (`test/make_rotate_clip.py`) on which the encoder
+      selects 1,144 compound warps. The clip exists because the older gate clips
+      only *evaluate* compound warps - a +1 on the kernel's compound average
+      leaves their md5s unchanged - while a +1 on the compound high-precision
+      buffer changes the rotate stream (`da802a1e...` vs the CPU's `3e43aca6...`).
+      That control is the evidence the kernel is on the path; the gate itself
+      requires the CPU md5 and a non-zero compound-warp count
 - [x] masked (inter-intra / wedge) blend call site: `combine_interintra_highbd()`
       runs `kernels/compound.comp` when `AV2_GPU_INTER=1` (21,359 blends in the
       gate at cpu-used 2, bitstream unchanged)

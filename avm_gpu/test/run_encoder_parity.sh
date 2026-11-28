@@ -499,6 +499,44 @@ if [ "$(hash_of "$work/tile_gpu.ivf")" != "$(hash_of "$work/tile_cpu.ivf")" ]; t
   exit 1
 fi
 
+# Compound warped prediction. The clips above evaluate it but never select it
+# for the final stream (a +1 on the kernel's compound average leaves every md5
+# unchanged), so this clip exists to put it on the path: content that rotates
+# and zooms, which the affine model expresses exactly and which the encoder then
+# picks for compound blocks. The positive control used to find that out: a +1 on
+# the kernel's compound high-precision buffer changes this bitstream
+# (da802a1e... vs the CPU's 3e43aca6...), while the same edit changes nothing on
+# the other gate clips.
+python3 "$here/make_rotate_clip.py" "$work/rotate.y4m"
+CW_ARGS="--limit=6 --good --cpu-used=8 --passes=1 --threads=1"
+if ! "$AVMENC" $CW_ARGS -o "$work/rotate_cpu.ivf" "$work/rotate.y4m" \
+    >"$work/rotate_cpu.log" 2>&1; then
+  echo "FAIL: CPU compound-warp encode failed"
+  tail -20 "$work/rotate_cpu.log"
+  exit 1
+fi
+if ! AV2_GPU_INTER=1 AV2_GPU_INTER_STATS=1 "$AVMENC" $CW_ARGS \
+    -o "$work/rotate_gpu.ivf" "$work/rotate.y4m" >"$work/rotate.log" 2>&1; then
+  if grep -q "no Vulkan device\|vkCreateInstance" "$work/rotate.log"; then
+    echo "SKIP: no Vulkan device"
+    exit 77
+  fi
+  echo "FAIL: GPU compound-warp encode failed"
+  tail -20 "$work/rotate.log"
+  exit 1
+fi
+cwcalls=$(sed -n 's/.* \([0-9][0-9]*\) compound warped,.*/\1/p' "$work/rotate.log")
+if [ -z "$cwcalls" ] || [ "$cwcalls" -le 0 ]; then
+  echo "FAIL: the GPU predicted no compound warped block"
+  tail -20 "$work/rotate.log"
+  exit 1
+fi
+echo "compound warp  : $(wc -c <"$work/rotate_gpu.ivf" | tr -d ' ') bytes, md5 $(hash_of "$work/rotate_gpu.ivf") ($cwcalls compound warped)"
+if [ "$(hash_of "$work/rotate_gpu.ivf")" != "$(hash_of "$work/rotate_cpu.ivf")" ]; then
+  echo "FAIL: compound-warp bitstream differs from the CPU"
+  exit 1
+fi
+
 cpu_hash=$(hash_of "$work/cpu.ivf")
 gpu_hash=$(hash_of "$work/gpu.ivf")
 cpu_size=$(wc -c <"$work/cpu.ivf" | tr -d ' ')
@@ -554,4 +592,4 @@ if [ "$mask_cpu_hash" != "$mask_hash" ]; then
   exit 1
 fi
 
-echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration, deblock, CDEF and CCSO paths"
+echo "PASS: bit-identical bitstreams with the Vulkan SAD, variance, inter, masked-compound, intra, loop-restoration, deblock, CDEF, CCSO and compound-warp paths"
