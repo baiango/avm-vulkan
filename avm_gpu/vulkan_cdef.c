@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_CDEF_SPV_PATH
@@ -25,6 +26,9 @@
 #define CDEF_VERY_LARGE_VALUE 0x4000
 
 struct avm_gpu_cdef {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  uint32_t *in_host, *out_host; /* mapped pointer or host shadow per slot */
+  size_t in_host_cap, out_host_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_buf in, out;
   VkDeviceSize in_cap, out_cap;
@@ -46,6 +50,18 @@ int avm_gpu_cdef_create(avm_gpu_ctx *ctx, avm_gpu_cdef **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
+  {
+    const char *env = getenv("AV2_GPU_ARENA");
+    if (env && *env && strcmp(env, "0")) {
+      const char *mb = getenv("AV2_GPU_ARENA_MB");
+      const VkDeviceSize bytes =
+          (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+      char aerr[AVM_GPU_ERR_LEN];
+      if (avm_gpu_arena_create(ctx, bytes, &cd->arena, aerr) != 0) {
+        cd->arena = NULL;
+      }
+    }
+  }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_CDEF_SPV_PATH, "AVM_GPU_CDEF_SPV",
                               2, sizeof(push_constants), &cd->pipe,
                               err) != 0) {
@@ -59,8 +75,12 @@ int avm_gpu_cdef_create(avm_gpu_ctx *ctx, avm_gpu_cdef **out,
 void avm_gpu_cdef_destroy(avm_gpu_ctx *ctx, avm_gpu_cdef *cd) {
   if (!cd) return;
   avm_gpu_pipeline_destroy(ctx, cd->pipe);
+  /* the host pointers alias the mapped buffers on the host-visible path */
+  if (cd->in_host != cd->in.mapped) free(cd->in_host);
+  if (cd->out_host != cd->out.mapped) free(cd->out_host);
   avm_gpu_buf_destroy(ctx, &cd->in);
   avm_gpu_buf_destroy(ctx, &cd->out);
+  avm_gpu_arena_destroy(ctx, cd->arena);
   free(cd->expand);
   free(cd);
 }
@@ -93,22 +113,31 @@ int avm_gpu_cdef_filter16(avm_gpu_ctx *ctx, avm_gpu_cdef *cd,
   }
   for (size_t i = 0; i < pixels; i++) cd->expand[i] = in[i];
 
-  if (cd->in_cap < (VkDeviceSize)pixels * 4) {
-    avm_gpu_buf_destroy(ctx, &cd->in);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pixels * 4, &cd->in, err) != 0) {
-      return -1;
-    }
-    cd->in_cap = cd->in.size;
-  }
-  if (cd->out_cap < (VkDeviceSize)dstride * h * 4) {
-    avm_gpu_buf_destroy(ctx, &cd->out);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)dstride * h * 4, &cd->out,
+  const VkDeviceSize in_bytes = (VkDeviceSize)pixels * 4;
+  const VkDeviceSize out_bytes = (VkDeviceSize)dstride * h * 4;
+  if (avm_gpu_slot_reserve(ctx, cd->arena, &cd->in, &cd->in_cap, in_bytes,
+                           err) != 0 ||
+      avm_gpu_slot_reserve(ctx, cd->arena, &cd->out, &cd->out_cap, out_bytes,
                            err) != 0) {
-      return -1;
-    }
-    cd->out_cap = cd->out.size;
+    return -1;
   }
-  memcpy(cd->in.mapped, cd->expand, pixels * 4);
+  if (cd->in.mapped) {
+    cd->in_host = cd->in.mapped;
+  } else if (avm_gpu_shadow_reserve(&cd->in_host, &cd->in_host_cap, in_bytes,
+                                    err) != 0) {
+    return -1;
+  }
+  if (cd->out.mapped) {
+    cd->out_host = cd->out.mapped;
+  } else if (avm_gpu_shadow_reserve(&cd->out_host, &cd->out_host_cap,
+                                    out_bytes, err) != 0) {
+    return -1;
+  }
+  memcpy(cd->in_host, cd->expand, pixels * 4);
+  if (avm_gpu_shadow_push(ctx, cd->arena, &cd->in, cd->in_host, in_bytes,
+                          err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[2] = { cd->in, cd->out };
   push_constants pc = { (uint32_t)stride,
@@ -133,7 +162,11 @@ int avm_gpu_cdef_filter16(avm_gpu_ctx *ctx, avm_gpu_cdef *cd,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = cd->out.mapped;
+  if (avm_gpu_shadow_pull(ctx, cd->arena, &cd->out, cd->out_host, out_bytes,
+                          err) != 0) {
+    return -1;
+  }
+  const uint32_t *res = cd->out_host;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
       dst[(size_t)y * dstride + x] = (uint16_t)res[y * dstride + x];

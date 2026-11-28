@@ -202,6 +202,7 @@ void avm_gpu_inter_destroy(avm_gpu_ctx *ctx, avm_gpu_inter *in) {
   avm_gpu_buf_destroy(ctx, &in->src);
   avm_gpu_buf_destroy(ctx, &in->filt);
   avm_gpu_buf_destroy(ctx, &in->dst);
+  avm_gpu_buf_destroy(ctx, &in->conv);
   avm_gpu_buf_destroy(ctx, &in->s0);
   avm_gpu_buf_destroy(ctx, &in->s1);
   avm_gpu_buf_destroy(ctx, &in->mask);

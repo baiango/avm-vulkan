@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_CCSO_SPV_PATH
@@ -23,9 +24,12 @@
 #endif
 
 struct avm_gpu_ccso {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  uint32_t *src_host, *dst_host, *lut_host;
+  size_t src_host_cap, dst_host_cap, lut_host_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_buf src, dst, lut;
-  VkDeviceSize src_cap, dst_cap;
+  VkDeviceSize src_cap, dst_cap, lut_cap;
   uint32_t *expand;
   size_t expand_cap;
 };
@@ -45,6 +49,18 @@ int avm_gpu_ccso_create(avm_gpu_ctx *ctx, avm_gpu_ccso **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
+  {
+    const char *env = getenv("AV2_GPU_ARENA");
+    if (env && *env && strcmp(env, "0")) {
+      const char *mb = getenv("AV2_GPU_ARENA_MB");
+      const VkDeviceSize bytes =
+          (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+      char aerr[AVM_GPU_ERR_LEN];
+      if (avm_gpu_arena_create(ctx, bytes, &cc->arena, aerr) != 0) {
+        cc->arena = NULL;
+      }
+    }
+  }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_CCSO_SPV_PATH, "AVM_GPU_CCSO_SPV",
                               3, sizeof(push_constants), &cc->pipe,
                               err) != 0) {
@@ -58,9 +74,14 @@ int avm_gpu_ccso_create(avm_gpu_ctx *ctx, avm_gpu_ccso **out,
 void avm_gpu_ccso_destroy(avm_gpu_ctx *ctx, avm_gpu_ccso *cc) {
   if (!cc) return;
   avm_gpu_pipeline_destroy(ctx, cc->pipe);
+  /* the host pointers alias the mapped buffers on the host-visible path */
+  if (cc->src_host != cc->src.mapped) free(cc->src_host);
+  if (cc->dst_host != cc->dst.mapped) free(cc->dst_host);
+  if (cc->lut_host != cc->lut.mapped) free(cc->lut_host);
   avm_gpu_buf_destroy(ctx, &cc->src);
   avm_gpu_buf_destroy(ctx, &cc->dst);
   avm_gpu_buf_destroy(ctx, &cc->lut);
+  avm_gpu_arena_destroy(ctx, cc->arena);
   free(cc->expand);
   free(cc);
 }
@@ -91,35 +112,50 @@ int avm_gpu_ccso_block(avm_gpu_ctx *ctx, avm_gpu_ccso *cc,
     }
   }
 
-  if (cc->src_cap < (VkDeviceSize)src_pixels * 4) {
-    avm_gpu_buf_destroy(ctx, &cc->src);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)src_pixels * 4, &cc->src,
+  const VkDeviceSize src_bytes = (VkDeviceSize)src_pixels * 4;
+  const VkDeviceSize dst_bytes = (VkDeviceSize)dst_pixels * 4;
+  const VkDeviceSize lut_bytes = AVM_GPU_CCSO_LUT_ENTRIES * 4;
+  if (avm_gpu_slot_reserve(ctx, cc->arena, &cc->src, &cc->src_cap, src_bytes,
+                           err) != 0 ||
+      avm_gpu_slot_reserve(ctx, cc->arena, &cc->dst, &cc->dst_cap, dst_bytes,
+                           err) != 0 ||
+      avm_gpu_slot_reserve(ctx, cc->arena, &cc->lut, &cc->lut_cap, lut_bytes,
                            err) != 0) {
-      return -1;
-    }
-    cc->src_cap = cc->src.size;
+    return -1;
   }
-  if (cc->dst_cap < (VkDeviceSize)dst_pixels * 4) {
-    avm_gpu_buf_destroy(ctx, &cc->dst);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)dst_pixels * 4, &cc->dst,
-                           err) != 0) {
-      return -1;
-    }
-    cc->dst_cap = cc->dst.size;
+  if (cc->src.mapped) {
+    cc->src_host = cc->src.mapped;
+  } else if (avm_gpu_shadow_reserve(&cc->src_host, &cc->src_host_cap, src_bytes,
+                                    err) != 0) {
+    return -1;
   }
-  if (!cc->lut.buffer) {
-    if (avm_gpu_buf_create(ctx, AVM_GPU_CCSO_LUT_ENTRIES * 4, &cc->lut,
-                           err) != 0) {
-      return -1;
-    }
+  if (cc->dst.mapped) {
+    cc->dst_host = cc->dst.mapped;
+  } else if (avm_gpu_shadow_reserve(&cc->dst_host, &cc->dst_host_cap, dst_bytes,
+                                    err) != 0) {
+    return -1;
+  }
+  if (cc->lut.mapped) {
+    cc->lut_host = cc->lut.mapped;
+  } else if (avm_gpu_shadow_reserve(&cc->lut_host, &cc->lut_host_cap, lut_bytes,
+                                    err) != 0) {
+    return -1;
   }
 
   for (size_t i = 0; i < src_pixels; i++) cc->expand[i] = src_y[i];
-  memcpy(cc->src.mapped, cc->expand, src_pixels * 4);
-  uint32_t *dp = cc->dst.mapped;
+  memcpy(cc->src_host, cc->expand, src_pixels * 4);
+  uint32_t *dp = cc->dst_host;
   for (size_t i = 0; i < dst_pixels; i++) dp[i] = dst[i];
-  uint32_t *lp = cc->lut.mapped;
+  uint32_t *lp = cc->lut_host;
   for (int i = 0; i < AVM_GPU_CCSO_LUT_ENTRIES; i++) lp[i] = (uint32_t)offset_buf[i];
+  if (avm_gpu_shadow_push(ctx, cc->arena, &cc->src, cc->src_host, src_bytes,
+                          err) != 0 ||
+      avm_gpu_shadow_push(ctx, cc->arena, &cc->dst, cc->dst_host, dst_bytes,
+                          err) != 0 ||
+      avm_gpu_shadow_push(ctx, cc->arena, &cc->lut, cc->lut_host, lut_bytes,
+                          err) != 0) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[3] = { cc->src, cc->dst, cc->lut };
   push_constants pc = { (uint32_t)src_stride,
@@ -148,6 +184,10 @@ int avm_gpu_ccso_block(avm_gpu_ctx *ctx, avm_gpu_ccso *cc,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
+  if (avm_gpu_shadow_pull(ctx, cc->arena, &cc->dst, cc->dst_host, dst_bytes,
+                          err) != 0) {
+    return -1;
+  }
   for (size_t i = 0; i < dst_pixels; i++) out[i] = (uint16_t)dp[i];
   return 0;
 }

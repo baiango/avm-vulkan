@@ -66,6 +66,22 @@ int avm_gpu_slot_download(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
                           const avm_gpu_buf *buf, void *data, VkDeviceSize bytes,
                           char err[AVM_GPU_ERR_LEN]);
 
+/*
+ * Host shadow for a slot: buffers that are filled and read back element by
+ * element keep their own code and write into this shadow when the slot is a
+ * suballocation, uploading before and downloading after the dispatch. For a
+ * host-visible slot the shadow *is* the mapped pointer and push/pull are no
+ * ops, so the two placements cost the same code path.
+ */
+int avm_gpu_shadow_reserve(uint32_t **host, size_t *cap, VkDeviceSize bytes,
+                           char err[AVM_GPU_ERR_LEN]);
+int avm_gpu_shadow_push(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
+                        const avm_gpu_buf *buf, const uint32_t *host,
+                        VkDeviceSize bytes, char err[AVM_GPU_ERR_LEN]);
+int avm_gpu_shadow_pull(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
+                        const avm_gpu_buf *buf, uint32_t *host,
+                        VkDeviceSize bytes, char err[AVM_GPU_ERR_LEN]);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

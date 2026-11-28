@@ -33,14 +33,17 @@ struct avm_gpu_arena {
   VkDeviceMemory staging_memory;
   void *staging_map;
   VkDeviceSize staging_size;
+  VkDeviceSize align;
   arena_block *blocks;
   int n_blocks;
   int cap_blocks;
   VkCommandBuffer cb;
 };
 
-static VkDeviceSize align_up(VkDeviceSize v) {
-  return (v + (ARENA_ALIGN - 1)) & ~(VkDeviceSize)(ARENA_ALIGN - 1);
+/* Suballocations must satisfy the device's descriptor-offset alignment, which
+ * is usually larger than a cache line (256 on many drivers). */
+static VkDeviceSize align_up(VkDeviceSize v, VkDeviceSize align) {
+  return (v + (align - 1)) & ~(align - 1);
 }
 
 static uint32_t find_memory_type(avm_gpu_ctx *ctx, uint32_t bits,
@@ -106,7 +109,18 @@ int avm_gpu_arena_create(avm_gpu_ctx *ctx, VkDeviceSize bytes,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  a->size = align_up(bytes);
+  a->align = ARENA_ALIGN;
+  {
+    const VkDeviceSize dev = avm_gpu_storage_offset_alignment(ctx);
+    if (dev > a->align) a->align = dev;
+  }
+  if (getenv("AV2_GPU_ARENA_VERBOSE")) {
+    fprintf(stderr,
+            "avm_gpu: arena %llu MiB, suballocation offset alignment %llu\n",
+            (unsigned long long)(bytes / (1024u * 1024u)),
+            (unsigned long long)a->align);
+  }
+  a->size = align_up(bytes, a->align);
   if (make_buffer(ctx, a->size, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &a->buffer,
                   &a->memory, NULL, err) != 0) {
     free(a);
@@ -165,7 +179,7 @@ VkBuffer avm_gpu_arena_buffer(const avm_gpu_arena *a) { return a->buffer; }
 int avm_gpu_arena_alloc(avm_gpu_ctx *ctx, avm_gpu_arena *a, VkDeviceSize size,
                         VkDeviceSize *offset, char err[AVM_GPU_ERR_LEN]) {
   (void)ctx;
-  const VkDeviceSize need = align_up(size ? size : 4);
+  const VkDeviceSize need = align_up(size ? size : 4, a->align);
   for (int i = 0; i < a->n_blocks; i++) {
     if (!a->blocks[i].free || a->blocks[i].size < need) continue;
     if (a->blocks[i].size == need) {
@@ -346,4 +360,33 @@ int avm_gpu_slot_download(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
   }
   memcpy(data, buf->mapped, (size_t)bytes);
   return 0;
+}
+
+int avm_gpu_shadow_reserve(uint32_t **host, size_t *cap, VkDeviceSize bytes,
+                           char err[AVM_GPU_ERR_LEN]) {
+  if ((size_t)bytes <= *cap) return 0;
+  free(*host);
+  *host = malloc((size_t)bytes);
+  *cap = *host ? (size_t)bytes : 0;
+  if (!*host) {
+    snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+    return -1;
+  }
+  /* A fresh host-visible VkBuffer reads as zero; keep the shadow identical. */
+  memset(*host, 0, (size_t)bytes);
+  return 0;
+}
+
+int avm_gpu_shadow_push(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
+                        const avm_gpu_buf *buf, const uint32_t *host,
+                        VkDeviceSize bytes, char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) return 0;
+  return avm_gpu_slot_upload(ctx, arena, buf, host, bytes, err);
+}
+
+int avm_gpu_shadow_pull(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
+                        const avm_gpu_buf *buf, uint32_t *host,
+                        VkDeviceSize bytes, char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) return 0;
+  return avm_gpu_slot_download(ctx, arena, buf, host, bytes, err);
 }

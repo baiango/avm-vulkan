@@ -25,6 +25,8 @@ struct avm_gpu_ctx {
   uint32_t queue_family;
   VkFence fence;
   char name[256];
+  /* vkCmdUpdate/copy and descriptor offsets must respect this. */
+  VkDeviceSize storage_offset_align;
 };
 
 /* The module requires Vulkan 1.4: the instance is created for exactly that
@@ -151,6 +153,7 @@ int avm_gpu_ctx_create(avm_gpu_ctx **out, char err[AVM_GPU_ERR_LEN]) {
 
   VkPhysicalDeviceProperties props;
   vkGetPhysicalDeviceProperties(ctx->physical, &props);
+  ctx->storage_offset_align = props.limits.minStorageBufferOffsetAlignment;
   snprintf(ctx->name, sizeof(ctx->name),
            "%s (Vulkan %u.%u device, %u.%u instance)", props.deviceName,
            VK_API_VERSION_MAJOR(props.apiVersion),
@@ -163,9 +166,32 @@ int avm_gpu_ctx_create(avm_gpu_ctx **out, char err[AVM_GPU_ERR_LEN]) {
   qci.queueFamilyIndex = ctx->queue_family;
   qci.queueCount = 1;
   qci.pQueuePriorities = &prio;
+  static const char *const k_portability_subset = "VK_KHR_portability_subset";
   VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
   dci.queueCreateInfoCount = 1;
   dci.pQueueCreateInfos = &qci;
+  /* MoltenVK advertises VK_KHR_portability_subset, and the spec then requires
+   * the device to enable it (VUID-VkDeviceCreateInfo-pProperties-04451). */
+  {
+    uint32_t dev_ext_count = 0;
+    if (vkEnumerateDeviceExtensionProperties(ctx->physical, NULL,
+                                             &dev_ext_count, NULL) ==
+            VK_SUCCESS &&
+        dev_ext_count) {
+      VkExtensionProperties *exts = calloc(dev_ext_count, sizeof(*exts));
+      if (exts && vkEnumerateDeviceExtensionProperties(
+                      ctx->physical, NULL, &dev_ext_count, exts) == VK_SUCCESS) {
+        for (uint32_t i = 0; i < dev_ext_count; i++) {
+          if (!strcmp(exts[i].extensionName, "VK_KHR_portability_subset")) {
+            dci.enabledExtensionCount = 1;
+            dci.ppEnabledExtensionNames = &k_portability_subset;
+            break;
+          }
+        }
+      }
+      free(exts);
+    }
+  }
   r = vkCreateDevice(ctx->physical, &dci, NULL, &ctx->device);
   if (r != VK_SUCCESS) {
     set_err(err, "vkCreateDevice", r);
@@ -292,6 +318,10 @@ int avm_gpu_submit_wait(avm_gpu_ctx *ctx, VkCommandBuffer cb,
 }
 
 VkDevice avm_gpu_device(const avm_gpu_ctx *ctx) { return ctx->device; }
+
+VkDeviceSize avm_gpu_storage_offset_alignment(const avm_gpu_ctx *ctx) {
+  return ctx->storage_offset_align ? ctx->storage_offset_align : 16;
+}
 VkPhysicalDevice avm_gpu_physical_device(const avm_gpu_ctx *ctx) {
   return ctx->physical;
 }

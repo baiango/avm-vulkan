@@ -171,9 +171,9 @@ and throughput is not claimed — this milestone is about correctness.
   the encoder parity gate passes with `AVM_GPU_PACK16=1` exported.
 - **Two placements.** By default buffers are host-visible and coherent: planes
   are uploaded by `memcpy` and results read back after the fence. With
-  `AV2_GPU_ARENA=1` the SAD, variance, warp and inter modules instead
-  suballocate their buffers from a single device-local `VkBuffer`
-  (`arena.{h,c}`), upload through
+  `AV2_GPU_ARENA=1` the SAD, variance, warp, inter, deblock, CDEF and CCSO
+  modules instead suballocate their buffers from a single device-local
+  `VkBuffer` (`arena.{h,c}`), upload through
   a reusable host-visible staging buffer with `vkCmdCopyBuffer`, and read back
   the same way. The descriptor offset of a suballocation travels in
   `avm_gpu_buf.offset`, and a suballocation is recognisable by
@@ -326,6 +326,37 @@ the block is re-packed per call. The remaining fixes are structural, not micro:
    `avm_gpu_sad_test_arena` / `avm_gpu_var_test_arena`): it is correct but a
    loss on unified memory; the next win is to keep the planes resident across
    calls (item 2) rather than to move them to VRAM.
+
+## Debugging
+
+The Khronos validation layer is the first tool to reach for: it found four of
+the defects listed above that the default path hid. Install it once
+(`brew install vulkan-validationlayers`) and run any gate or encode with
+
+```sh
+export VK_LAYER_PATH=/opt/homebrew/share/vulkan/explicit_layer.d
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation ./avm_gpu/avm_gpu_warp_test
+```
+
+A kernel reading outside its declared binding shows up here as a VUID, and that
+matters for the arena: a suballocation's neighbours hold other buffers, so an
+over-read that is harmless in a host-visible buffer reads someone else's data
+once the same buffer is a slot. `VK_INSTANCE_LAYERS=...` with
+`AV2_GPU_ARENA=1` checks the arena placement specifically.
+
+For host-side problems (a shadow that aliases a mapped pointer, a stale pointer
+after a realloc) `lldb` is quicker than printf:
+
+```sh
+lldb -- ./avm_gpu/avm_gpu_deblock_test
+(lldb) br set -n malloc_error_break     # macOS: breaks on a bad free
+(lldb) watchpoint set expression -- (uint32_t*)0x<shadow>
+```
+
+`MallocScribble=1 MallocGuardEdges=1` in the environment makes double frees and
+use-after-free fail on the spot, and `AV2_GPU_ARENA_VERBOSE=1` reports the
+arena's size, suballocation alignment and any slot that fell back to a
+host-visible buffer.
 
 ## Build and run
 
@@ -518,8 +549,29 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   through `avm_gpu_slot_*` like SAD, variance and the inter module (reference,
   filter, prediction, compound high-precision, blend sources/mask, CWP and the
   CWP convolve buffers; an arena slot gets a host shadow that the existing fill
-  and read loops keep using). Deblock, CDEF, CCSO, intra, the transforms and
-  PC-Wiener still use host-visible buffers and re-upload per call.
+  and read loops keep using). Deblock, CDEF and CCSO do the same through
+  `avm_gpu_shadow_*`, so each has an `*_arena` ctest variant. Intra, the forward
+  and inverse transforms and PC-Wiener stay on host-visible buffers: converting
+  intra and the transforms was tried and reverted - each gate passes and each
+  module matches the encoder stream on its own, but with all three converted at
+  once the noisy clip's stream differs (60eb748c... vs the CPU's f6ab7b6b...),
+  and that is unresolved, so the code is not in the tree. The arena now asks the
+  device for `minStorageBufferOffsetAlignment` instead of assuming 64 (64 on
+  MoltenVK, larger on other drivers); that was not the cause of the stream
+  difference, but suballocation offsets must satisfy it on any driver.
+  Validation: every GPU gate now runs clean under the Khronos validation layer
+  (`brew install vulkan-validationlayers`,
+  `VK_LAYER_PATH=/opt/homebrew/share/vulkan/explicit_layer.d` and
+  `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`) in both placements, after
+  the layer found four real defects: the device never enabled
+  `VK_KHR_portability_subset` that MoltenVK advertises (VUID-...-04451); the
+  warp seam bound `VK_NULL_HANDLE` as a storage buffer whenever a call had no
+  boundary box, which is undefined without the `nullDescriptor` feature (it now
+  binds a small dummy); the inter module never destroyed its conv buffer; and
+  the warp module never destroyed its arena. The layer also confirms no kernel
+  reads outside its declared bindings, which is what would have explained the
+  intra/transform combination difference - so that remains unexplained rather
+  than diagnosed.
   Measured on the rotate clip (6 frames, cpu-used 8, `AV2_GPU_INTER=1`): 104 s
   host-visible vs 118 s through the arena for the warp buffers alone, and 276 s
   when the inter module's windows go through it too, with the same md5 in every

@@ -35,6 +35,7 @@ struct avm_gpu_warp {
   avm_gpu_pipeline *ext_pipe;
   avm_gpu_pipeline *scaled_pipe;
   avm_gpu_buf box;
+  avm_gpu_buf dummy; /* binding 4 when no boundary box is used */
   avm_gpu_buf conv;
   VkDeviceSize conv_cap;
   avm_gpu_buf ext_filt;
@@ -231,12 +232,16 @@ void avm_gpu_warp_destroy(avm_gpu_ctx *ctx, avm_gpu_warp *w) {
   avm_gpu_pipeline_destroy(ctx, w->ext_pipe);
   avm_gpu_pipeline_destroy(ctx, w->scaled_pipe);
   avm_gpu_buf_destroy(ctx, &w->box);
+  avm_gpu_buf_destroy(ctx, &w->dummy);
   avm_gpu_buf_destroy(ctx, &w->conv);
   avm_gpu_buf_destroy(ctx, &w->ext_filt);
   avm_gpu_buf_destroy(ctx, &w->ref);
   avm_gpu_buf_destroy(ctx, &w->pred);
   avm_gpu_buf_destroy(ctx, &w->filt);
+  avm_gpu_arena_destroy(ctx, w->arena);
   free(w->expand);
+  free(w->stage32);
+  free(w->stage32s);
   free(w);
 }
 
@@ -451,8 +456,15 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
     memcpy(w->box.mapped, box, 32 * 32 * 4 * sizeof(int32_t));
   }
-  const avm_gpu_buf bufs[5] = { w->ref, w->pred,   w->ext_filt,
-                                 w->conv, w->box };
+  /* Binding 4 is the boundary box; a call without one must still bind a valid
+   * buffer (a VK_NULL_HANDLE descriptor is undefined without the
+   * nullDescriptor feature). */
+  if (!w->dummy.buffer && avm_gpu_buf_create(ctx, 64, &w->dummy, err) != 0) {
+    return -1;
+  }
+  avm_gpu_buf box_buf = w->box.buffer ? w->box : w->dummy;
+  const avm_gpu_buf bufs[5] = { w->ref, w->pred, w->ext_filt, w->conv,
+                                box_buf };
   ext_push_constants pc = { (uint32_t)width,
                             (uint32_t)height,
                             (uint32_t)stride,
@@ -597,8 +609,11 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   memcpy(w->box.mapped, box, 32 * 32 * 4 * sizeof(int32_t));
 
   if (warp_upload_conv(ctx, w, cmp, p_row + p_height, err) != 0) return -1;
-  const avm_gpu_buf bufs[5] = { w->ref, w->pred, w->ext_filt, w->box,
-                                w->conv };
+  if (!w->dummy.buffer && avm_gpu_buf_create(ctx, 64, &w->dummy, err) != 0) {
+    return -1;
+  }
+  const avm_gpu_buf bufs[5] = { w->ref,  w->pred, w->ext_filt,
+                                w->box.buffer ? w->box : w->dummy, w->conv };
   scaled_push_constants pc = {
     (uint32_t)width,
     (uint32_t)height,

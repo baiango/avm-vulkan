@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_DEBLOCK_SPV_PATH
@@ -23,6 +24,9 @@
 #endif
 
 struct avm_gpu_deblock {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  uint32_t *host;       /* the slot's mapped pointer or its shadow */
+  size_t host_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_buf img;
   VkDeviceSize img_cap;
@@ -35,6 +39,43 @@ typedef struct push_constants {
       ll_pos, count, step;
 } push_constants;
 
+/* Returns the host copy the kernel's buffer is filled from: the mapped pointer
+ * for a host-visible buffer, or a shadow that is uploaded before the dispatch
+ * and downloaded after it. */
+static int db_reserve(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
+                      VkDeviceSize bytes, char err[AVM_GPU_ERR_LEN]) {
+  if (avm_gpu_slot_reserve(ctx, db->arena, &db->img, &db->img_cap, bytes,
+                           err) != 0) {
+    return -1;
+  }
+  if (db->img.mapped) {
+    db->host = db->img.mapped;
+    return 0;
+  }
+  if ((size_t)bytes > db->host_cap) {
+    free(db->host);
+    db->host = malloc((size_t)bytes);
+    db->host_cap = db->host ? (size_t)bytes : 0;
+    if (!db->host) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int db_push(avm_gpu_ctx *ctx, avm_gpu_deblock *db, VkDeviceSize bytes,
+                   char err[AVM_GPU_ERR_LEN]) {
+  if (db->img.mapped) return 0;
+  return avm_gpu_slot_upload(ctx, db->arena, &db->img, db->host, bytes, err);
+}
+
+static int db_pull(avm_gpu_ctx *ctx, avm_gpu_deblock *db, VkDeviceSize bytes,
+                   char err[AVM_GPU_ERR_LEN]) {
+  if (db->img.mapped) return 0;
+  return avm_gpu_slot_download(ctx, db->arena, &db->img, db->host, bytes, err);
+}
+
 int avm_gpu_deblock_create(avm_gpu_ctx *ctx, avm_gpu_deblock **out,
                            char err[AVM_GPU_ERR_LEN]) {
   *out = NULL;
@@ -42,6 +83,18 @@ int avm_gpu_deblock_create(avm_gpu_ctx *ctx, avm_gpu_deblock **out,
   if (!db) {
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
+  }
+  {
+    const char *env = getenv("AV2_GPU_ARENA");
+    if (env && *env && strcmp(env, "0")) {
+      const char *mb = getenv("AV2_GPU_ARENA_MB");
+      const VkDeviceSize bytes =
+          (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+      char aerr[AVM_GPU_ERR_LEN];
+      if (avm_gpu_arena_create(ctx, bytes, &db->arena, aerr) != 0) {
+        db->arena = NULL;
+      }
+    }
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_DEBLOCK_SPV_PATH,
                               "AVM_GPU_DEBLOCK_SPV", 1, sizeof(push_constants),
@@ -56,7 +109,11 @@ int avm_gpu_deblock_create(avm_gpu_ctx *ctx, avm_gpu_deblock **out,
 void avm_gpu_deblock_destroy(avm_gpu_ctx *ctx, avm_gpu_deblock *db) {
   if (!db) return;
   avm_gpu_pipeline_destroy(ctx, db->pipe);
+  /* host aliases img.mapped on the host-visible path, so it must not be freed
+   * after the buffer took it down. */
+  if (db->host != db->img.mapped) free(db->host);
   avm_gpu_buf_destroy(ctx, &db->img);
+  avm_gpu_arena_destroy(ctx, db->arena);
   free(db->plane);
   free(db);
 }
@@ -84,14 +141,9 @@ int avm_gpu_deblock_generic(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
   }
   for (size_t i = 0; i < pixels; i++) db->plane[i] = plane[i];
 
-  if (db->img_cap < (VkDeviceSize)pixels * 4) {
-    avm_gpu_buf_destroy(ctx, &db->img);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pixels * 4, &db->img, err) != 0) {
-      return -1;
-    }
-    db->img_cap = db->img.size;
-  }
-  memcpy(db->img.mapped, db->plane, pixels * 4);
+  if (db_reserve(ctx, db, (VkDeviceSize)pixels * 4, err) != 0) return -1;
+  memcpy(db->host, db->plane, pixels * 4);
+  if (db_push(ctx, db, (VkDeviceSize)pixels * 4, err) != 0) return -1;
 
   const avm_gpu_buf bufs[1] = { db->img };
   push_constants pc = { (uint32_t)((size_t)y * stride + x),
@@ -109,7 +161,8 @@ int avm_gpu_deblock_generic(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
       avm_gpu_pipeline_dispatch(ctx, db->pipe, bufs, 1, &pc, sizeof(pc), 1, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = db->img.mapped;
+  if (db_pull(ctx, db, (VkDeviceSize)pixels * 4, err) != 0) return -1;
+  const uint32_t *res = db->host;
   for (size_t i = 0; i < pixels; i++) out[i] = (uint16_t)res[i];
   return 0;
 }
@@ -150,16 +203,12 @@ int avm_gpu_deblock_window(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
     }
   }
 
-  if (db->img_cap < (VkDeviceSize)wspan * hspan * 4) {
-    avm_gpu_buf_destroy(ctx, &db->img);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)wspan * hspan * 4, &db->img,
-                           err) != 0) {
-      return -1;
-    }
-    db->img_cap = db->img.size;
+  if (db_reserve(ctx, db, (VkDeviceSize)wspan * hspan * 4, err) != 0) {
+    return -1;
   }
-  uint32_t *img = db->img.mapped;
+  uint32_t *img = db->host;
   for (int i = 0; i < wspan * hspan; i++) img[i] = win[i];
+  if (db_push(ctx, db, (VkDeviceSize)wspan * hspan * 4, err) != 0) return -1;
 
   const avm_gpu_buf bufs[1] = { db->img };
   /* The window is laid out so the four samples run along the rows: delta
@@ -173,6 +222,7 @@ int avm_gpu_deblock_window(avm_gpu_ctx *ctx, avm_gpu_deblock *db,
       avm_gpu_pipeline_dispatch(ctx, db->pipe, bufs, 1, &pc, sizeof(pc), 1, err);
   if (rc != 0) return rc;
 
+  if (db_pull(ctx, db, (VkDeviceSize)wspan * hspan * 4, err) != 0) return -1;
   for (int j = 0; j < hspan; j++) {
     for (int i = 0; i < wspan; i++) {
       out[j * step + (i - reach) * across_pitch] =

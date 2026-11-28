@@ -59,6 +59,9 @@ int avm_gpu_submit_wait(avm_gpu_ctx *ctx, VkCommandBuffer cb,
 
 /* Exposed for the kernels' host side; do not use outside avm_gpu. */
 VkDevice avm_gpu_device(const avm_gpu_ctx *ctx);
+/* minStorageBufferOffsetAlignment of the device; arena suballocations and any
+ * buffer offset handed to a descriptor or a copy respect it. */
+VkDeviceSize avm_gpu_storage_offset_alignment(const avm_gpu_ctx *ctx);
 VkPhysicalDevice avm_gpu_physical_device(const avm_gpu_ctx *ctx);
 VkCommandPool avm_gpu_command_pool(const avm_gpu_ctx *ctx);
 
