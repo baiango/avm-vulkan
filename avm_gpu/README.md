@@ -10,6 +10,16 @@ scaled), compound A64 mask blending, weighted (CWP) compound and affine
 CUDA, no wgpu and no C++ in the module. The data model is still M0 (see below),
 and throughput is not claimed — this milestone is about correctness.
 
+**Planned: native backends per platform.** Vulkan is used today through MoltenVK
+on Apple hardware and through the vendor driver on Linux/Windows. The plan is to
+replace it on the two platforms where that costs the most: a **CUDA** backend for
+NVIDIA GPUs, where the current Vulkan path pays a dispatch and staging cost the
+native driver does not, and a **Metal** backend for Apple silicon, replacing
+MoltenVK. Both are meant to keep the same kernel contracts and the same parity
+gates described below (`ctest -R avm_gpu_`), so the choice of backend stays
+invisible in the bitstream. None of this exists yet; the tables, kernels and
+gates in this directory are Vulkan-only.
+
 ## What M0 proves
 
 - `avm_gpu_sad_*` prices a batch of SAD candidates on the GPU and returns values
@@ -512,6 +522,9 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
 
 ## Not done (M1/M2)
 
+- Native CUDA (NVIDIA) and Metal (Apple) backends to replace Vulkan on those
+  platforms; today every kernel, gate and seam in this directory is Vulkan via
+  MoltenVK or the vendor driver. See the note at the top.
 - Entropy coding, CDF state, headers, rate control: CPU by design.
 - Compound warped prediction (a warp on a two-reference block) is on the GPU and
   is proven at stream level. The kernels write the 16-bit conv buffer for the

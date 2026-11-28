@@ -194,6 +194,12 @@ is **off by default** and **not wired into the encoder** yet; what exists is a
 small set of pixel kernels that are already proven bit-identical to AVM's C
 reference code.
 
+**Roadmap.** Vulkan runs through MoltenVK on Apple hardware and through the
+vendor driver elsewhere. **Native CUDA (NVIDIA) and Metal (Apple) backends are
+planned to replace Vulkan on those platforms**, keeping the same kernel contracts
+and parity gates so the bitstream does not depend on the backend. Neither exists
+today; everything in `avm_gpu/` is Vulkan-only.
+
 Everything lives in [`avm_gpu/`](avm_gpu/README.md); that file is the module
 documentation. This section is the short version.
 
