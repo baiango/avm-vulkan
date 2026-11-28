@@ -171,7 +171,7 @@ and throughput is not claimed — this milestone is about correctness.
   the encoder parity gate passes with `AVM_GPU_PACK16=1` exported.
 - **Two placements.** By default buffers are host-visible and coherent: planes
   are uploaded by `memcpy` and results read back after the fence. With
-  `AV2_GPU_ARENA=1` the SAD and variance modules instead suballocate their
+  `AV2_GPU_ARENA=1` the SAD, variance and warp modules instead suballocate their
   buffers from a single device-local `VkBuffer` (`arena.{h,c}`), upload through
   a reusable host-visible staging buffer with `vkCmdCopyBuffer`, and read back
   the same way. The descriptor offset of a suballocation travels in
@@ -467,7 +467,10 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
       (80,895 -> 51,403 dispatches, 18.1 s -> 12.3 s, same md5)
 - [x] variance seam: content-keyed memo + block-area threshold
       (457,023 -> 5,261 kernel blocks, 92.8 s -> 1.9 s, same md5)
-- [x] device-local arena + staging copies, opt-in, gated for SAD and variance
+- [x] device-local arena + staging copies, opt-in, gated for SAD, variance and
+      the warp module (reference, prediction, high-precision and boundary box of
+      the regular/extended/scaled kernels; same md5s, 104 s -> 118 s on the
+      rotate clip, i.e. a loss on unified memory)
 - [x] docs, CMake option, ctest wiring (`ctest -R avm_gpu_`)
 
 ## Not done (M1/M2)
@@ -504,10 +507,16 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   Not packed, on purpose: intra reads only the neighbour row/column (a few
   hundred bytes per call), the inverse transform reads 32-bit coefficients
   (packing them would truncate), deblock uploads one 4x21 window per edge
-  (168 bytes per call, below a dispatch), and CDEF/CCSO are still gate-only
-  modules whose seams are not wired into an encode, so packing them would change
-  no stream. A device-local arena exists for SAD and variance, but the rest use
-  host-visible buffers and re-upload per call.
+  (168 bytes per call, below a dispatch), CDEF uploads one bordered filter block
+  (12x12 at most for luma) and CCSO stages one processing unit plus its border
+  (about 6 KB for a 32x32 unit). The device-local arena (`AV2_GPU_ARENA=1`) now
+  covers the warp module too - the reference, prediction, high-precision and
+  boundary-box buffers of the regular, extended-range and scaled kernels go
+  through `avm_gpu_slot_*` like SAD and variance. Inter, compound, CWP, deblock,
+  CDEF and CCSO still use host-visible buffers and re-upload per call.
+  Measured on the rotate clip (6 frames, cpu-used 8, `AV2_GPU_INTER=1`): 104 s
+  host-visible vs 118 s through the arena with the same md5 - the staging copies
+  cost more than they save on unified memory, so the arena stays opt-in.
 - Scaled compound is live. The SIGBUS that blocked it was a reproducer bug -
   it passed `scaled=0` together with a 1/1024 step (910), so the seam's window
   arithmetic (`(h-1)*step >> 4`) produced a 3592-row window and read outside the

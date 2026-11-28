@@ -392,6 +392,11 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_warp_test PRIVATE avm)
   add_test(NAME avm_gpu_warp_test COMMAND avm_gpu_warp_test)
   set_tests_properties(avm_gpu_warp_test PROPERTIES SKIP_RETURN_CODE 77)
+  # Same gate with the warp buffers in the device-local arena.
+  add_test(NAME avm_gpu_warp_test_arena COMMAND avm_gpu_warp_test)
+  set_tests_properties(avm_gpu_warp_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
 
   # End-to-end: encode the same clip with the CPU and the Vulkan SAD path and
   # require identical bitstreams.

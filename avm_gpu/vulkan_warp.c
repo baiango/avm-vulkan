@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_WARP_SPV_PATH
@@ -29,6 +30,7 @@
 #endif
 
 struct avm_gpu_warp {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *ext_pipe;
   avm_gpu_pipeline *scaled_pipe;
@@ -40,6 +42,11 @@ struct avm_gpu_warp {
   VkDeviceSize ref_cap, pred_cap;
   uint32_t *expand;
   size_t expand_cap;
+  uint32_t *stage32;
+  size_t stage32_cap;
+  int announced;
+  int32_t *stage32s;
+  size_t stage32s_cap;
 };
 
 typedef struct push_constants {
@@ -57,36 +64,134 @@ typedef struct push_constants {
  * typedef lives in vulkan_warp.h). */
 typedef avm_gpu_warp_compound warp_compound;
 
+static int warp_put_u16(avm_gpu_ctx *ctx, avm_gpu_warp *w, avm_gpu_buf *buf,
+                        const uint16_t *src, size_t n,
+                        char err[AVM_GPU_ERR_LEN]);
+static int warp_get_u16(avm_gpu_ctx *ctx, avm_gpu_warp *w,
+                        const avm_gpu_buf *buf, uint16_t *dst, size_t n,
+                        char err[AVM_GPU_ERR_LEN]);
+
 static int warp_upload_conv(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                             const warp_compound *cmp, int h,
                             char err[AVM_GPU_ERR_LEN]) {
   /* A single-reference call binds a block-sized dummy (a one-entry range made
    * the driver return garbage for a shader that declares the binding). */
   const size_t n = cmp ? (size_t)cmp->conv_stride * (size_t)h : 64 * 64;
-  if (w->conv_cap < (VkDeviceSize)n * 4) {
-    avm_gpu_buf_destroy(ctx, &w->conv);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)n * 4, &w->conv, err) != 0) {
-      return -1;
-    }
-    w->conv_cap = w->conv.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->conv, &w->conv_cap,
+                           (VkDeviceSize)n * 4, err) != 0) {
+    return -1;
   }
   if (cmp && cmp->conv) {
-    uint32_t *cp = w->conv.mapped;
-    for (size_t i = 0; i < n; i++) cp[i] = cmp->conv[i];
+    return warp_put_u16(ctx, w, &w->conv, cmp->conv, n, err);
   }
   return 0;
 }
 
-static void warp_download_conv(avm_gpu_warp *w, const warp_compound *cmp,
-                               int wd, int h) {
-  if (!cmp || !cmp->conv || cmp->do_average) return;
-  const uint32_t *cp = w->conv.mapped;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < wd; x++) {
-      cmp->conv[(size_t)y * cmp->conv_stride + x] =
-          (uint16_t)cp[(size_t)y * cmp->conv_stride + x];
+static int warp_download_conv(avm_gpu_ctx *ctx, avm_gpu_warp *w,
+                              const warp_compound *cmp, int wd, int h,
+                              char err[AVM_GPU_ERR_LEN]) {
+  if (!cmp || !cmp->conv || cmp->do_average) return 0;
+  const int stride = cmp->conv_stride;
+  if (w->conv.mapped) {
+    const uint32_t *cp = w->conv.mapped;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < wd; x++) {
+        cmp->conv[(size_t)y * stride + x] = (uint16_t)cp[(size_t)y * stride + x];
+      }
+    }
+    return 0;
+  }
+  /* Arena slot: read the rows the block owns into the staging buffer. */
+  const size_t n = (size_t)stride * (size_t)h;
+  if (n > w->stage32_cap) {
+    free(w->stage32);
+    w->stage32 = malloc(n * sizeof(*w->stage32));
+    w->stage32_cap = w->stage32 ? n : 0;
+    if (!w->stage32) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
     }
   }
+  if (avm_gpu_slot_download(ctx, w->arena, &w->conv, w->stage32, n * 4, err) != 0) {
+    return -1;
+  }
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < wd; x++) {
+      cmp->conv[(size_t)y * stride + x] =
+          (uint16_t)w->stage32[(size_t)y * stride + x];
+    }
+  }
+  return 0;
+}
+
+static avm_gpu_arena *warp_arena_if_enabled(avm_gpu_ctx *ctx) {
+  const char *env = getenv("AV2_GPU_ARENA");
+  if (!env || !*env || !strcmp(env, "0")) return NULL;
+  const char *mb = getenv("AV2_GPU_ARENA_MB");
+  const VkDeviceSize size =
+      (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+  char err[AVM_GPU_ERR_LEN];
+  avm_gpu_arena *arena = NULL;
+  if (avm_gpu_arena_create(ctx, size, &arena, err) != 0) {
+    if (getenv("AV2_GPU_ARENA_VERBOSE")) {
+      fprintf(stderr, "avm_gpu: warp arena unavailable (%s)\n", err);
+    }
+    return NULL;
+  }
+  return arena;
+}
+
+/* Copies n u16 samples as 32-bit words into a slot. */
+static int warp_put_u16(avm_gpu_ctx *ctx, avm_gpu_warp *w, avm_gpu_buf *buf,
+                        const uint16_t *src, size_t n,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) {
+    uint32_t *p = buf->mapped;
+    for (size_t i = 0; i < n; i++) p[i] = src[i];
+    return 0;
+  }
+  if (n > w->stage32_cap) {
+    free(w->stage32);
+    w->stage32 = malloc(n * sizeof(*w->stage32));
+    w->stage32_cap = w->stage32 ? n : 0;
+    if (!w->stage32) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < n; i++) w->stage32[i] = src[i];
+  if (w->arena && !w->announced) {
+    w->announced = 1;
+    if (getenv("AV2_GPU_ARENA_VERBOSE")) {
+      fprintf(stderr, "avm_gpu: warp buffers live in the device-local arena\n");
+    }
+  }
+  return avm_gpu_slot_upload(ctx, w->arena, buf, w->stage32, n * 4, err);
+}
+
+/* Reads n u16 samples back from a slot written as 32-bit words. */
+static int warp_get_u16(avm_gpu_ctx *ctx, avm_gpu_warp *w,
+                        const avm_gpu_buf *buf, uint16_t *dst, size_t n,
+                        char err[AVM_GPU_ERR_LEN]) {
+  if (buf->mapped) {
+    const uint32_t *p = buf->mapped;
+    for (size_t i = 0; i < n; i++) dst[i] = (uint16_t)p[i];
+    return 0;
+  }
+  if (n > w->stage32_cap) {
+    free(w->stage32);
+    w->stage32 = malloc(n * sizeof(*w->stage32));
+    w->stage32_cap = w->stage32 ? n : 0;
+    if (!w->stage32) {
+      snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
+      return -1;
+    }
+  }
+  if (avm_gpu_slot_download(ctx, w->arena, buf, w->stage32, n * 4, err) != 0) {
+    return -1;
+  }
+  for (size_t i = 0; i < n; i++) dst[i] = (uint16_t)w->stage32[i];
+  return 0;
 }
 
 int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
@@ -97,6 +202,7 @@ int avm_gpu_warp_create(avm_gpu_ctx *ctx, avm_gpu_warp **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
+  w->arena = warp_arena_if_enabled(ctx);
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_WARP_SPV_PATH, "AVM_GPU_WARP_SPV",
                               4, sizeof(push_constants), &w->pipe,
                               err) != 0) {
@@ -170,19 +276,13 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   }
 
   const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
-  if (w->ref_cap < ref_bytes) {
-    avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
-      return -1;
-    }
-    w->ref_cap = w->ref.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->ref, &w->ref_cap, ref_bytes,
+                           err) != 0) {
+    return -1;
   }
-  if (w->pred_cap < (VkDeviceSize)pred_n * 4) {
-    avm_gpu_buf_destroy(ctx, &w->pred);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pred_n * 4, &w->pred, err) != 0) {
-      return -1;
-    }
-    w->pred_cap = w->pred.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->pred, &w->pred_cap,
+                           (VkDeviceSize)pred_n * 4, err) != 0) {
+    return -1;
   }
   if (!w->ext_filt.buffer) {
     if (avm_gpu_buf_create(ctx, AVM_GPU_WARP_EXT_FILTER_ROWS * 8 * 4,
@@ -198,13 +298,22 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   }
 
   if (packed) {
-    memcpy(w->ref.mapped, ref, ref_n * 2);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, ref, ref_n * 2);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, ref, ref_n * 2,
+                                   err) != 0) {
+      return -1;
+    }
   } else {
     for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, w->expand,
+                                   (VkDeviceSize)ref_n * 4, err) != 0) {
+      return -1;
+    }
   }
-  uint32_t *pp = w->pred.mapped;
-  for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
+  if (warp_put_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
   int32_t *fp = w->filt.mapped;
   for (int i = 0; i < AVM_GPU_WARP_FILTER_ROWS * 8; i++) fp[i] = filter[i];
 
@@ -246,8 +355,8 @@ int avm_gpu_warp_affine(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  for (size_t i = 0; i < pred_n; i++) pred[i] = (uint16_t)pp[i];
-  warp_download_conv(w, cmp, p_width, p_height);
+  if (warp_get_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
+  if (warp_download_conv(ctx, w, cmp, p_width, p_height, err) != 0) return -1;
   return 0;
 }
 
@@ -293,19 +402,13 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
   const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
-  if (w->ref_cap < ref_bytes) {
-    avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
-      return -1;
-    }
-    w->ref_cap = w->ref.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->ref, &w->ref_cap, ref_bytes,
+                           err) != 0) {
+    return -1;
   }
-  if (w->pred_cap < (VkDeviceSize)pred_n * 4) {
-    avm_gpu_buf_destroy(ctx, &w->pred);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pred_n * 4, &w->pred, err) != 0) {
-      return -1;
-    }
-    w->pred_cap = w->pred.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->pred, &w->pred_cap,
+                           (VkDeviceSize)pred_n * 4, err) != 0) {
+    return -1;
   }
   if (!w->ext_filt.buffer) {
     if (avm_gpu_buf_create(ctx, AVM_GPU_WARP_EXT_FILTER_ROWS * 8 * 4,
@@ -315,13 +418,22 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   }
 
   if (packed) {
-    memcpy(w->ref.mapped, ref, ref_n * 2);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, ref, ref_n * 2);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, ref, ref_n * 2,
+                                   err) != 0) {
+      return -1;
+    }
   } else {
     for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, w->expand,
+                                   (VkDeviceSize)ref_n * 4, err) != 0) {
+      return -1;
+    }
   }
-  uint32_t *pp = w->pred.mapped;
-  for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
+  if (warp_put_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
   int32_t *fp = w->ext_filt.mapped;
   for (int i = 0; i < AVM_GPU_WARP_EXT_FILTER_ROWS * 8; i++) fp[i] = filter[i];
 
@@ -374,8 +486,8 @@ int avm_gpu_warp_affine_ext(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  for (size_t i = 0; i < pred_n; i++) pred[i] = (uint16_t)pp[i];
-  warp_download_conv(w, cmp, p_width, p_height);
+  if (warp_get_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
+  if (warp_download_conv(ctx, w, cmp, p_width, p_height, err) != 0) return -1;
   return 0;
 }
 
@@ -441,19 +553,13 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
     }
   }
   const VkDeviceSize ref_bytes = (VkDeviceSize)(packed ? ref_n * 2 : ref_n * 4);
-  if (w->ref_cap < ref_bytes) {
-    avm_gpu_buf_destroy(ctx, &w->ref);
-    if (avm_gpu_buf_create(ctx, ref_bytes, &w->ref, err) != 0) {
-      return -1;
-    }
-    w->ref_cap = w->ref.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->ref, &w->ref_cap, ref_bytes,
+                           err) != 0) {
+    return -1;
   }
-  if (w->pred_cap < (VkDeviceSize)pred_n * 4) {
-    avm_gpu_buf_destroy(ctx, &w->pred);
-    if (avm_gpu_buf_create(ctx, (VkDeviceSize)pred_n * 4, &w->pred, err) != 0) {
-      return -1;
-    }
-    w->pred_cap = w->pred.size;
+  if (avm_gpu_slot_reserve(ctx, w->arena, &w->pred, &w->pred_cap,
+                           (VkDeviceSize)pred_n * 4, err) != 0) {
+    return -1;
   }
   /* The boundary box is a MAX_WARP_BD_SIZE^2 grid of 8x8 sub-block limits. */
   if (!w->ext_filt.buffer) {
@@ -470,13 +576,22 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
   }
 
   if (packed) {
-    memcpy(w->ref.mapped, ref, ref_n * 2);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, ref, ref_n * 2);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, ref, ref_n * 2,
+                                   err) != 0) {
+      return -1;
+    }
   } else {
     for (size_t i = 0; i < ref_n; i++) w->expand[i] = ref[i];
-    memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    if (w->ref.mapped) {
+      memcpy(w->ref.mapped, w->expand, ref_n * 4);
+    } else if (avm_gpu_slot_upload(ctx, w->arena, &w->ref, w->expand,
+                                   (VkDeviceSize)ref_n * 4, err) != 0) {
+      return -1;
+    }
   }
-  uint32_t *pp = w->pred.mapped;
-  for (size_t i = 0; i < pred_n; i++) pp[i] = pred[i];
+  if (warp_put_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
   int32_t *fp = w->ext_filt.mapped;
   for (int i = 0; i < AVM_GPU_WARP_EXT_FILTER_ROWS * 8; i++) fp[i] = filter[i];
   memcpy(w->box.mapped, box, 32 * 32 * 4 * sizeof(int32_t));
@@ -522,7 +637,7 @@ int avm_gpu_warp_affine_scaled(avm_gpu_ctx *ctx, avm_gpu_warp *w,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  for (size_t i = 0; i < pred_n; i++) pred[i] = (uint16_t)pp[i];
-  warp_download_conv(w, cmp, p_width, p_height);
+  if (warp_get_u16(ctx, w, &w->pred, pred, pred_n, err) != 0) return -1;
+  if (warp_download_conv(ctx, w, cmp, p_width, p_height, err) != 0) return -1;
   return 0;
 }
