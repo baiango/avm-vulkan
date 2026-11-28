@@ -150,8 +150,7 @@ int avm_gpu_inter_create(avm_gpu_ctx *ctx, avm_gpu_inter **out,
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
   }
-  const char *arena_env = getenv("AV2_GPU_ARENA");
-  if (arena_env && *arena_env && strcmp(arena_env, "0")) {
+  if (avm_gpu_arena_wanted("inter")) {
     const char *mb = getenv("AV2_GPU_ARENA_MB");
     const VkDeviceSize arena_bytes =
         (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;

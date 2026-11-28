@@ -85,8 +85,7 @@ int avm_gpu_deblock_create(avm_gpu_ctx *ctx, avm_gpu_deblock **out,
     return -1;
   }
   {
-    const char *env = getenv("AV2_GPU_ARENA");
-    if (env && *env && strcmp(env, "0")) {
+    if (avm_gpu_arena_wanted("deblock")) {
       const char *mb = getenv("AV2_GPU_ARENA_MB");
       const VkDeviceSize bytes =
           (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;

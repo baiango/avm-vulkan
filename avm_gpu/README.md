@@ -181,7 +181,12 @@ and throughput is not claimed — this milestone is about correctness.
   memory it does not own. If the arena cannot satisfy a request (or is full)
   the slot silently falls back to a host-visible buffer, and
   `AV2_GPU_ARENA_VERBOSE=1` reports it.
-  `AV2_GPU_ARENA_MB` sets the arena size (default 64 MiB).
+  `AV2_GPU_ARENA_MB` sets the arena size (default 64 MiB) and
+  `AV2_GPU_ARENA_EXCLUDE=intra,itxfm` keeps the named modules on host-visible
+  buffers while the rest stay in the arena - which is how a fault that needs
+  several modules at once is bisected (it is a pure predicate,
+  `avm_gpu_arena_wanted()`, so with the list unset the placement is exactly what
+  it was before).
   On Apple silicon the arena is *slower* than plain host-visible buffers
   (unified memory, so the staging copy is pure overhead): the three-encode
   parity gate takes 126 s with the default placement and 543 s with

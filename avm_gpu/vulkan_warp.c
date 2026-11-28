@@ -126,8 +126,7 @@ static int warp_download_conv(avm_gpu_ctx *ctx, avm_gpu_warp *w,
 }
 
 static avm_gpu_arena *warp_arena_if_enabled(avm_gpu_ctx *ctx) {
-  const char *env = getenv("AV2_GPU_ARENA");
-  if (!env || !*env || !strcmp(env, "0")) return NULL;
+  if (!avm_gpu_arena_wanted("warp")) return NULL;
   const char *mb = getenv("AV2_GPU_ARENA_MB");
   const VkDeviceSize size =
       (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;

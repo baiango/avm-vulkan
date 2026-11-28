@@ -67,6 +67,16 @@ int avm_gpu_slot_download(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
                           char err[AVM_GPU_ERR_LEN]);
 
 /*
+ * Whether this module should use the device-local arena: AV2_GPU_ARENA must be
+ * set to something other than 0, and AV2_GPU_ARENA_EXCLUDE (a comma-separated
+ * list of module names, e.g. "intra,itxfm") must not name it. The exclusion
+ * list exists so one module can be put back on host-visible memory while the
+ * rest stay in the arena - which is how a fault that needs several modules at
+ * once gets bisected.
+ */
+int avm_gpu_arena_wanted(const char *module);
+
+/*
  * Host shadow for a slot: buffers that are filled and read back element by
  * element keep their own code and write into this shadow when the slot is a
  * suballocation, uploading before and downloading after the dispatch. For a

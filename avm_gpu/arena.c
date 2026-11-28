@@ -390,3 +390,20 @@ int avm_gpu_shadow_pull(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
   if (buf->mapped) return 0;
   return avm_gpu_slot_download(ctx, arena, buf, host, bytes, err);
 }
+
+int avm_gpu_arena_wanted(const char *module) {
+  const char *env = getenv("AV2_GPU_ARENA");
+  if (!env || !*env || !strcmp(env, "0")) return 0;
+  const char *excl = getenv("AV2_GPU_ARENA_EXCLUDE");
+  if (!excl || !*excl || !module || !*module) return 1;
+  const size_t len = strlen(module);
+  for (const char *p = excl; *p;) {
+    while (*p == ',' || *p == ' ') p++;
+    const char *start = p;
+    while (*p && *p != ',') p++;
+    size_t n = (size_t)(p - start);
+    while (n && (start[n - 1] == ' ')) n--;
+    if (n == len && !strncmp(start, module, len)) return 0;
+  }
+  return 1;
+}
