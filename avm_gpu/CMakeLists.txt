@@ -326,6 +326,11 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_pcwiener_test PRIVATE avm)
   add_test(NAME avm_gpu_pcwiener_test COMMAND avm_gpu_pcwiener_test)
   set_tests_properties(avm_gpu_pcwiener_test PROPERTIES SKIP_RETURN_CODE 77)
+  # Same gate with the PC-Wiener buffers in the device-local arena.
+  add_test(NAME avm_gpu_pcwiener_test_arena COMMAND avm_gpu_pcwiener_test)
+  set_tests_properties(avm_gpu_pcwiener_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
 
   # CWP two-pass diagnostic (not a test): prints the first-pass value at one
   # pixel from the C, the kernel and a hand evaluation.
