@@ -548,10 +548,27 @@ corruption). What is left looks like one class of bug:
   offsets, the `pri_strength >> coeff_shift & 1` tap selection, `constrain()`
   including its `damping - msb(threshold)` shift, the sentinel handling in the
   min/max clamp, the `(8 + sum - (sum < 0)) >> 4` rounding and the final clamp.
-  The next probe is the kernel's own per-pixel sum: `cdef.comp`'s last push
-  constant is an unused `pad`, which can carry a debug flag that makes the shader
-  write the tap sum instead of the filtered pixel, so the failing case can be
-  compared contribution by contribution.
+  The kernel's own numbers were then measured with `AVM_GPU_CDEF_SUM=N`, which
+  reuses `cdef.comp`'s unused final push constant to make the shader emit a
+  probe instead of the filtered pixel (`CDEF_DUMP_CASE=1` pins the dump to this
+  configuration):
+
+      probe 1 (tap sum)              0        reference -8 (hand-computed from the
+                                               dumped window: -6 primary -2 secondary)
+      probe 2 (centre sample)        937      correct
+      probe 3 (first secondary tap)  937      = the centre, should be 502
+      probe 4 (dampings)             4,5      correct
+      probe 5 (explicit right nbr)   502      correct
+      probe 6 (explicit lower nbr)   385      correct
+      probe 7 (DIR[2][0], constant)  (0,1)    correct
+
+  So `idx()`, `at()` and the table itself are right, and so are the push
+  constants, but a **dynamically indexed lookup into the `DIR` constant array
+  yields (0,0)** inside the loop: every tap then reads the centre, every diff is
+  0 and the sum collapses to 0. Rewriting the secondary index as an explicit
+  wrap (`dir + 2 >= 8 ? dir - 6 : dir + 2`) did not change it, so the next
+  change is to stop indexing the array dynamically at all and return the eight
+  offsets from a `switch` with literal values.
 - `inter_seam_test` reports "Not Run" on the box because its target is not part
   of the target list used there.
 

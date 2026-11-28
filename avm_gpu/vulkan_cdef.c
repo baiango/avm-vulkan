@@ -154,7 +154,9 @@ int avm_gpu_cdef_filter16(avm_gpu_ctx *ctx, avm_gpu_cdef *cd,
                         (uint32_t)(enable_sec ? 1 : 0),
                         (uint32_t)CDEF_VERY_LARGE_VALUE,
                         (uint32_t)dstride,
-                        0 };
+                        getenv("AVM_GPU_CDEF_SUM")
+                            ? (uint32_t)atoi(getenv("AVM_GPU_CDEF_SUM"))
+                            : 0u };
   const uint32_t gx = (uint32_t)((w + 7) / 8);
   const uint32_t gy = (uint32_t)((h + 7) / 8);
   const int rc = avm_gpu_pipeline_dispatch_2d(ctx, cd->pipe, bufs, 2, &pc,

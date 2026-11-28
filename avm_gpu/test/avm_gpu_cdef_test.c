@@ -143,7 +143,15 @@ int main(void) {
                 }
               }
               cases++;
-              if (diff && getenv("CDEF_DUMP")) {
+              /* CDEF_DUMP_CASE pins the dump to the first failing configuration
+               * found on the NVIDIA box (dir 0, pri 4, sec 2, damp 4/5, shift 2,
+               * variant 0), so the sum probe can look at that case alone. */
+              const int pinned = getenv("CDEF_DUMP_CASE") != NULL;
+              const int wanted =
+                  !pinned || (dir == 0 && kStrength[s][0] == 4 &&
+                              kStrength[s][1] == 2 && pri_damping == 4 &&
+                              sec_damping == 5 && kShift[sh] == 2 && variant == 0);
+              if (diff && wanted && getenv("CDEF_DUMP")) {
                 static int dumped = 0;
                 if (dumped++ == 0) {
                   /* The taps reach two rows/columns beyond the block; print

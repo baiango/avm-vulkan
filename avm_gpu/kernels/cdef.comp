@@ -130,6 +130,37 @@ void main() {
     }
   }
 
+  /* Debug: pc.pad is unused; when set the shader emits its tap sum (biased) so
+   * a failing case can be compared contribution by contribution. */
+  if (pc.pad == 1u) {
+    out_px[i * int(pc.dstride) + j] = uint(vsum + 4096);
+    return;
+  }
+  if (pc.pad == 2u) {  /* centre sample */
+    out_px[i * int(pc.dstride) + j] = uint(x);
+    return;
+  }
+  if (pc.pad == 3u) {  /* first secondary tap, k = 0 */
+    const ivec2 d0 = DIR[(dir + 2) & 7][0];
+    out_px[i * int(pc.dstride) + j] = uint(at(i + d0.x, j + d0.y));
+    return;
+  }
+  if (pc.pad == 5u) {  /* explicit right neighbour */
+    out_px[i * int(pc.dstride) + j] = uint(at(i, j + 1));
+    return;
+  }
+  if (pc.pad == 6u) {  /* explicit lower neighbour */
+    out_px[i * int(pc.dstride) + j] = uint(at(i + 1, j));
+    return;
+  }
+  if (pc.pad == 7u) {  /* DIR[2][0] components */
+    out_px[i * int(pc.dstride) + j] = uint(DIR[2][0].x + 10 * DIR[2][0].y);
+    return;
+  }
+  if (pc.pad == 4u) {  /* pri damping as the shader sees it */
+    out_px[i * int(pc.dstride) + j] = uint(pri_damping * 100u + sec_damping);
+    return;
+  }
   int y = x + ((8 + vsum - (vsum < 0 ? 1 : 0)) >> 4);
   if (clipping_required) y = min(max(y, mn), mx);
   out_px[i * int(pc.dstride) + j] = uint(y);
