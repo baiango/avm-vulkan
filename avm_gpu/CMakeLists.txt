@@ -306,12 +306,20 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_txfm_test PRIVATE avm)
   add_test(NAME avm_gpu_txfm_test COMMAND avm_gpu_txfm_test)
   set_tests_properties(avm_gpu_txfm_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME avm_gpu_txfm_test_arena COMMAND avm_gpu_txfm_test)
+  set_tests_properties(avm_gpu_txfm_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
 
   add_executable(avm_gpu_intra_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_intra_test.c")
   target_link_libraries(avm_gpu_intra_test PRIVATE avm)
   add_test(NAME avm_gpu_intra_test COMMAND avm_gpu_intra_test)
   set_tests_properties(avm_gpu_intra_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME avm_gpu_intra_test_arena COMMAND avm_gpu_intra_test)
+  set_tests_properties(avm_gpu_intra_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
 
   add_executable(avm_gpu_pcwiener_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_pcwiener_test.c")
@@ -356,6 +364,10 @@ if(ENABLE_TESTS)
   target_link_libraries(avm_gpu_itxfm_test PRIVATE avm)
   add_test(NAME avm_gpu_itxfm_test COMMAND avm_gpu_itxfm_test)
   set_tests_properties(avm_gpu_itxfm_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME avm_gpu_itxfm_test_arena COMMAND avm_gpu_itxfm_test)
+  set_tests_properties(avm_gpu_itxfm_test_arena
+                       PROPERTIES SKIP_RETURN_CODE 77
+                                  ENVIRONMENT "AV2_GPU_ARENA=1")
 
   add_executable(avm_gpu_inter_test
                  "${CMAKE_CURRENT_SOURCE_DIR}/test/avm_gpu_inter_test.c")

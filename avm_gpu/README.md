@@ -555,15 +555,17 @@ encoder speedup; the NVIDIA boxes are where the throughput case has to be made.
   filter, prediction, compound high-precision, blend sources/mask, CWP and the
   CWP convolve buffers; an arena slot gets a host shadow that the existing fill
   and read loops keep using). Deblock, CDEF and CCSO do the same through
-  `avm_gpu_shadow_*`, so each has an `*_arena` ctest variant. Intra, the forward
-  and inverse transforms and PC-Wiener stay on host-visible buffers: converting
-  intra and the transforms was tried and reverted - each gate passes and each
-  module matches the encoder stream on its own, but with all three converted at
-  once the noisy clip's stream differs (60eb748c... vs the CPU's f6ab7b6b...),
-  and that is unresolved, so the code is not in the tree. The arena now asks the
-  device for `minStorageBufferOffsetAlignment` instead of assuming 64 (64 on
-  MoltenVK, larger on other drivers); that was not the cause of the stream
-  difference, but suballocation offsets must satisfy it on any driver.
+  `avm_gpu_shadow_*`, so each has an `*_arena` ctest variant. Intra and both
+  transforms are in the arena too, each with its own `*_arena` gate. The
+  combination that was recorded here as an open defect is not one: with all
+  three converted, a 2-frame 64x64 encode reproduces the CPU stream
+  (`ea817572...`) in both placements, and their gates pass either way. What
+  looked like a hang was MoltenVK's per-call dispatch cost - the same three hooks
+  on the 192x192 noisy clip take hours for four frames - and the mismatching
+  `60eb748c...` came from an earlier, incomplete run of the pre-teardown-fix
+  code. PC-Wiener is the only module still on host-visible buffers. The arena
+  also asks the device for `minStorageBufferOffsetAlignment` instead of assuming
+  64, since suballocation offsets must satisfy it on any driver.
   Validation: every GPU gate now runs clean under the Khronos validation layer
   (`brew install vulkan-validationlayers`,
   `VK_LAYER_PATH=/opt/homebrew/share/vulkan/explicit_layer.d` and

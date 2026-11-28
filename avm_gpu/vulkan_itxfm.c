@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_ITXFM_SPV_PATH
@@ -25,9 +26,12 @@
 #define ITXFM_WORKGROUP 32
 
 struct avm_gpu_itxfm {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  uint32_t *h_coef, *h_pos, *h_dst, *h_mat;
+  size_t h_coef_cap, h_pos_cap, h_dst_cap, h_mat_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_buf coef, pos, dst, mat;
-  VkDeviceSize coef_cap, pos_cap, dst_cap;
+  VkDeviceSize coef_cap, pos_cap, dst_cap, mat_cap;
   uint32_t *plane;
   size_t plane_cap;
 };
@@ -41,13 +45,12 @@ typedef struct block_pos {
   uint32_t src_off, dst_off;
 } block_pos;
 
-static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
-                      VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
+static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_arena *arena,
+                      avm_gpu_buf *buf, VkDeviceSize *cap, VkDeviceSize need,
+                      char err[AVM_GPU_ERR_LEN]) {
   if (*cap >= need) return 0;
   avm_gpu_buf_destroy(ctx, buf);
-  if (avm_gpu_buf_create(ctx, need, buf, err) != 0) return -1;
-  *cap = buf->size;
-  return 0;
+  return avm_gpu_slot_reserve(ctx, arena, buf, cap, need, err);
 }
 
 int avm_gpu_itxfm_create(avm_gpu_ctx *ctx, avm_gpu_itxfm **out,
@@ -57,6 +60,15 @@ int avm_gpu_itxfm_create(avm_gpu_ctx *ctx, avm_gpu_itxfm **out,
   if (!it) {
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
+  }
+  if (avm_gpu_arena_wanted("itxfm")) {
+    const char *mb = getenv("AV2_GPU_ARENA_MB");
+    const VkDeviceSize bytes =
+        (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+    char aerr[AVM_GPU_ERR_LEN];
+    if (avm_gpu_arena_create(ctx, bytes, &it->arena, aerr) != 0) {
+      it->arena = NULL;
+    }
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_ITXFM_SPV_PATH, "AVM_GPU_ITXFM_SPV",
                               4, sizeof(push_constants), &it->pipe,
@@ -74,7 +86,12 @@ void avm_gpu_itxfm_destroy(avm_gpu_ctx *ctx, avm_gpu_itxfm *it) {
   avm_gpu_buf_destroy(ctx, &it->coef);
   avm_gpu_buf_destroy(ctx, &it->pos);
   avm_gpu_buf_destroy(ctx, &it->dst);
+  if (it->h_coef != it->coef.mapped) free(it->h_coef);
+  if (it->h_pos != it->pos.mapped) free(it->h_pos);
+  if (it->h_dst != it->dst.mapped) free(it->h_dst);
+  if (it->h_mat != it->mat.mapped) free(it->h_mat);
   avm_gpu_buf_destroy(ctx, &it->mat);
+  avm_gpu_arena_destroy(ctx, it->arena);
   free(it->plane);
   free(it);
 }
@@ -174,26 +191,41 @@ static int add_tx(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, const int32_t *coeffs,
   const VkDeviceSize dst_bytes = (VkDeviceSize)pixels * 4;
   const VkDeviceSize mat_bytes = (VkDeviceSize)(w * w + h * h) * 4;
   int rc = -1;
-  if (ensure_buf(ctx, &it->coef, &it->coef_cap, coef_bytes, err) ||
-      ensure_buf(ctx, &it->pos, &it->pos_cap, pos_bytes, err) ||
-      ensure_buf(ctx, &it->dst, &it->dst_cap, dst_bytes, err)) {
+  if (ensure_buf(ctx, it->arena, &it->coef, &it->coef_cap, coef_bytes, err) ||
+      ensure_buf(ctx, it->arena, &it->pos, &it->pos_cap, pos_bytes, err) ||
+      ensure_buf(ctx, it->arena, &it->dst, &it->dst_cap, dst_bytes, err) ||
+      ensure_buf(ctx, it->arena, &it->mat, &it->mat_cap, mat_bytes, err)) {
     free(pos);
     return -1;
   }
-  if (it->mat.size < mat_bytes) {
-    avm_gpu_buf_destroy(ctx, &it->mat);
-    if (avm_gpu_buf_create(ctx, mat_bytes, &it->mat, err) != 0) {
-      free(pos);
-      return -1;
-    }
+  if ((!it->coef.mapped &&
+       avm_gpu_shadow_reserve(&it->h_coef, &it->h_coef_cap, coef_bytes, err)) ||
+      (!it->pos.mapped &&
+       avm_gpu_shadow_reserve(&it->h_pos, &it->h_pos_cap, pos_bytes, err)) ||
+      (!it->dst.mapped &&
+       avm_gpu_shadow_reserve(&it->h_dst, &it->h_dst_cap, dst_bytes, err)) ||
+      (!it->mat.mapped &&
+       avm_gpu_shadow_reserve(&it->h_mat, &it->h_mat_cap, mat_bytes, err))) {
+    free(pos);
+    return -1;
   }
-  memcpy(it->coef.mapped, coeffs, (size_t)coef_bytes);
-  memcpy(it->pos.mapped, pos, (size_t)pos_bytes);
-  memcpy(it->dst.mapped, it->plane, (size_t)dst_bytes);
-  int32_t *mp = it->mat.mapped;
+  uint32_t *h_coef = it->coef.mapped ? it->coef.mapped : it->h_coef;
+  uint32_t *h_pos = it->pos.mapped ? it->pos.mapped : it->h_pos;
+  uint32_t *h_dst = it->dst.mapped ? it->dst.mapped : it->h_dst;
+  uint32_t *h_mat = it->mat.mapped ? it->mat.mapped : it->h_mat;
+  memcpy(h_coef, coeffs, (size_t)coef_bytes);
+  memcpy(h_pos, pos, (size_t)pos_bytes);
+  memcpy(h_dst, it->plane, (size_t)dst_bytes);
+  int32_t *mp = (int32_t *)h_mat;
   memcpy(mp, mat_w, (size_t)w * w * 4);
   memcpy(mp + w * w, mat_h, (size_t)h * h * 4);
   free(pos);
+  if (avm_gpu_shadow_push(ctx, it->arena, &it->coef, h_coef, coef_bytes, err) ||
+      avm_gpu_shadow_push(ctx, it->arena, &it->pos, h_pos, pos_bytes, err) ||
+      avm_gpu_shadow_push(ctx, it->arena, &it->dst, h_dst, dst_bytes, err) ||
+      avm_gpu_shadow_push(ctx, it->arena, &it->mat, h_mat, mat_bytes, err)) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[4] = { it->coef, it->pos, it->dst, it->mat };
   uint32_t s1 = 7, s2 = 10;
@@ -208,7 +240,10 @@ static int add_tx(avm_gpu_ctx *ctx, avm_gpu_itxfm *it, const int32_t *coeffs,
                                  groups, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = it->dst.mapped;
+  if (avm_gpu_shadow_pull(ctx, it->arena, &it->dst, h_dst, dst_bytes, err)) {
+    return -1;
+  }
+  const uint32_t *res = h_dst;
   for (size_t i = 0; i < pixels; i++) dest[i] = (uint16_t)res[i];
   return 0;
 }

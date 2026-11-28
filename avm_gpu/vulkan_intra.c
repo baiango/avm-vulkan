@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "avm_gpu/arena.h"
 #include "avm_gpu/pipeline.h"
 
 #ifndef AVM_GPU_INTRA_SPV_PATH
@@ -31,6 +32,10 @@
 #define INTRA_WORKGROUP 64
 
 struct avm_gpu_intra {
+  avm_gpu_arena *arena; /* device-local arena when AV2_GPU_ARENA=1 */
+  uint32_t *h_above, *h_left, *h_dst, *h_d_above, *h_d_left, *h_d_dst;
+  size_t h_above_cap, h_left_cap, h_dst_cap, h_d_above_cap, h_d_left_cap,
+      h_d_dst_cap;
   avm_gpu_pipeline *pipe;
   avm_gpu_pipeline *dir_pipe;
   avm_gpu_buf above, left, dst;
@@ -49,13 +54,12 @@ typedef struct push_constants {
   uint32_t bw, bh, mode, bd, stride, tl;
 } push_constants;
 
-static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_buf *buf, VkDeviceSize *cap,
-                      VkDeviceSize need, char err[AVM_GPU_ERR_LEN]) {
+static int ensure_buf(avm_gpu_ctx *ctx, avm_gpu_arena *arena, avm_gpu_buf *buf,
+                      VkDeviceSize *cap, VkDeviceSize need,
+                      char err[AVM_GPU_ERR_LEN]) {
   if (*cap >= need) return 0;
   avm_gpu_buf_destroy(ctx, buf);
-  if (avm_gpu_buf_create(ctx, need, buf, err) != 0) return -1;
-  *cap = buf->size;
-  return 0;
+  return avm_gpu_slot_reserve(ctx, arena, buf, cap, need, err);
 }
 
 int avm_gpu_intra_create(avm_gpu_ctx *ctx, avm_gpu_intra **out,
@@ -65,6 +69,13 @@ int avm_gpu_intra_create(avm_gpu_ctx *ctx, avm_gpu_intra **out,
   if (!in) {
     snprintf(err, AVM_GPU_ERR_LEN, "out of memory");
     return -1;
+  }
+  if (avm_gpu_arena_wanted("intra")) {
+    const char *mb = getenv("AV2_GPU_ARENA_MB");
+    const VkDeviceSize bytes =
+        (VkDeviceSize)(mb && *mb ? atoi(mb) : 64) * 1024u * 1024u;
+    char aerr[AVM_GPU_ERR_LEN];
+    if (avm_gpu_arena_create(ctx, bytes, &in->arena, aerr) != 0) in->arena = NULL;
   }
   if (avm_gpu_pipeline_create(ctx, AVM_GPU_INTRA_SPV_PATH, "AVM_GPU_INTRA_SPV",
                               3, sizeof(push_constants), &in->pipe,
@@ -92,7 +103,14 @@ void avm_gpu_intra_destroy(avm_gpu_ctx *ctx, avm_gpu_intra *in) {
   avm_gpu_buf_destroy(ctx, &in->dst);
   avm_gpu_buf_destroy(ctx, &in->d_above);
   avm_gpu_buf_destroy(ctx, &in->d_left);
+  if (in->h_above != in->above.mapped) free(in->h_above);
+  if (in->h_left != in->left.mapped) free(in->h_left);
+  if (in->h_dst != in->dst.mapped) free(in->h_dst);
+  if (in->h_d_above != in->d_above.mapped) free(in->h_d_above);
+  if (in->h_d_left != in->d_left.mapped) free(in->h_d_left);
+  if (in->h_d_dst != in->d_dst.mapped) free(in->h_d_dst);
   avm_gpu_buf_destroy(ctx, &in->d_dst);
+  avm_gpu_arena_destroy(ctx, in->arena);
   free(in->expand);
   free(in);
 }
@@ -162,18 +180,33 @@ int avm_gpu_intra_predict_tl(avm_gpu_ctx *ctx, avm_gpu_intra *in,
   }
 
   /* SMOOTH* also reads above[bw] and left[bh] (top-right / bottom-left). */
-  if (ensure_buf(ctx, &in->above, &in->above_cap,
-                 (VkDeviceSize)(bw + 1) * 4, err) ||
-      ensure_buf(ctx, &in->left, &in->left_cap, (VkDeviceSize)(bh + 1) * 4,
-                 err) ||
-      ensure_buf(ctx, &in->dst, &in->dst_cap, (VkDeviceSize)pixels * 4, err)) {
+  const VkDeviceSize ab_bytes = (VkDeviceSize)(bw + 1) * 4;
+  const VkDeviceSize lf_bytes = (VkDeviceSize)(bh + 1) * 4;
+  const VkDeviceSize dst_bytes = (VkDeviceSize)pixels * 4;
+  if (ensure_buf(ctx, in->arena, &in->above, &in->above_cap, ab_bytes, err) ||
+      ensure_buf(ctx, in->arena, &in->left, &in->left_cap, lf_bytes, err) ||
+      ensure_buf(ctx, in->arena, &in->dst, &in->dst_cap, dst_bytes, err)) {
     return -1;
   }
-  uint32_t *ab = in->above.mapped;
-  uint32_t *lf = in->left.mapped;
+  if ((!in->above.mapped &&
+       avm_gpu_shadow_reserve(&in->h_above, &in->h_above_cap, ab_bytes, err)) ||
+      (!in->left.mapped &&
+       avm_gpu_shadow_reserve(&in->h_left, &in->h_left_cap, lf_bytes, err)) ||
+      (!in->dst.mapped &&
+       avm_gpu_shadow_reserve(&in->h_dst, &in->h_dst_cap, dst_bytes, err))) {
+    return -1;
+  }
+  uint32_t *ab = in->above.mapped ? in->above.mapped : in->h_above;
+  uint32_t *lf = in->left.mapped ? in->left.mapped : in->h_left;
+  uint32_t *ds = in->dst.mapped ? in->dst.mapped : in->h_dst;
   for (int i = 0; i <= bw; i++) ab[i] = need_above ? above[i] : dummy;
   for (int i = 0; i <= bh; i++) lf[i] = need_left ? left[i] : dummy;
-  memset(in->dst.mapped, 0, (size_t)pixels * 4);
+  memset(ds, 0, (size_t)dst_bytes);
+  if (avm_gpu_shadow_push(ctx, in->arena, &in->above, ab, ab_bytes, err) ||
+      avm_gpu_shadow_push(ctx, in->arena, &in->left, lf, lf_bytes, err) ||
+      avm_gpu_shadow_push(ctx, in->arena, &in->dst, ds, dst_bytes, err)) {
+    return -1;
+  }
 
   const avm_gpu_buf bufs[3] = { in->above, in->left, in->dst };
   push_constants pc = { (uint32_t)bw,      (uint32_t)bh, (uint32_t)mode,
@@ -183,7 +216,10 @@ int avm_gpu_intra_predict_tl(avm_gpu_ctx *ctx, avm_gpu_intra *in,
                                            sizeof(pc), 1, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = in->dst.mapped;
+  if (avm_gpu_shadow_pull(ctx, in->arena, &in->dst, ds, dst_bytes, err)) {
+    return -1;
+  }
+  const uint32_t *res = ds;
   for (int y = 0; y < bh; y++) {
     for (int x = 0; x < bw; x++) dst[(size_t)y * stride + x] = res[y * stride + x];
   }
@@ -209,21 +245,35 @@ int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
   }
   const int edge_len = bw + bh + 8 + INTRA_EDGE_PAD;
 
-  if (ensure_buf(ctx, &in->d_above, &in->d_above_cap,
-                 (VkDeviceSize)edge_len * 4, err) ||
-      ensure_buf(ctx, &in->d_left, &in->d_left_cap, (VkDeviceSize)edge_len * 4,
+  const VkDeviceSize edge_bytes = (VkDeviceSize)edge_len * 4;
+  const VkDeviceSize ddst_bytes = (VkDeviceSize)stride * bh * 4;
+  if (ensure_buf(ctx, in->arena, &in->d_above, &in->d_above_cap, edge_bytes,
                  err) ||
-      ensure_buf(ctx, &in->d_dst, &in->d_dst_cap,
-                 (VkDeviceSize)stride * bh * 4, err)) {
+      ensure_buf(ctx, in->arena, &in->d_left, &in->d_left_cap, edge_bytes, err) ||
+      ensure_buf(ctx, in->arena, &in->d_dst, &in->d_dst_cap, ddst_bytes, err)) {
+    return -1;
+  }
+  if ((!in->d_above.mapped && avm_gpu_shadow_reserve(
+          &in->h_d_above, &in->h_d_above_cap, edge_bytes, err)) ||
+      (!in->d_left.mapped && avm_gpu_shadow_reserve(
+          &in->h_d_left, &in->h_d_left_cap, edge_bytes, err)) ||
+      (!in->d_dst.mapped && avm_gpu_shadow_reserve(
+          &in->h_d_dst, &in->h_d_dst_cap, ddst_bytes, err))) {
     return -1;
   }
 
   /* above/left point at the top-left sample; copy the guard window too. */
-  uint32_t *ab = in->d_above.mapped;
-  uint32_t *lf = in->d_left.mapped;
+  uint32_t *ab = in->d_above.mapped ? in->d_above.mapped : in->h_d_above;
+  uint32_t *lf = in->d_left.mapped ? in->d_left.mapped : in->h_d_left;
+  uint32_t *ds = in->d_dst.mapped ? in->d_dst.mapped : in->h_d_dst;
   for (int i = 0; i < edge_len; i++) {
     ab[i] = above[i - INTRA_EDGE_PAD];
     lf[i] = left[i - INTRA_EDGE_PAD];
+  }
+  if (avm_gpu_shadow_push(ctx, in->arena, &in->d_above, ab, edge_bytes, err) ||
+      avm_gpu_shadow_push(ctx, in->arena, &in->d_left, lf, edge_bytes, err) ||
+      avm_gpu_shadow_push(ctx, in->arena, &in->d_dst, ds, ddst_bytes, err)) {
+    return -1;
   }
 
   const avm_gpu_buf bufs[3] = { in->d_above, in->d_left, in->d_dst };
@@ -236,7 +286,10 @@ int avm_gpu_intra_dr_predict(avm_gpu_ctx *ctx, avm_gpu_intra *in,
                                               sizeof(pc), gx, gy, err);
   if (rc != 0) return rc;
 
-  const uint32_t *res = in->d_dst.mapped;
+  if (avm_gpu_shadow_pull(ctx, in->arena, &in->d_dst, ds, ddst_bytes, err)) {
+    return -1;
+  }
+  const uint32_t *res = ds;
   for (int y = 0; y < bh; y++) {
     for (int x = 0; x < bw; x++) {
       dst[(size_t)y * stride + x] = res[y * stride + x];
